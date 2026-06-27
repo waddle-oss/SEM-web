@@ -1,0 +1,10 @@
+path: E:/SEMphoto/123456.v1i.yolov8
+train: train/images
+val: valid/images
+test: test/images
+
+nc: 1
+names: ['particle']
+
+# 训练配置
+imgsz: 1024

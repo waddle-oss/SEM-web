@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SEM 颗粒智能分析系统</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        .container {
+            background: #ffffff;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+            padding: 30px;
+            max-width: 1200px;
+            width: 100%;
+            min-height: 80vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* 登录页 */
+        .login-box {
+            text-align: center;
+            max-width: 400px;
+            margin: auto;
+        }
+        .login-box .logo { font-size: 48px; margin-bottom: 8px; }
+        .login-box h1 { font-size: 24px; color: #1a1a2e; margin-bottom: 6px; }
+        .login-box .subtitle { color: #888; font-size: 13px; margin-bottom: 30px; }
+        .login-box input {
+            width: 100%; padding: 12px 16px; margin-bottom: 14px;
+            border: 2px solid #e0e0e0; border-radius: 10px; font-size: 14px;
+            transition: border 0.3s; background: #fafafa;
+        }
+        .login-box input:focus { border-color: #0f3460; outline: none; background: #fff; }
+        .login-btn {
+            width: 100%; padding: 13px;
+            background: linear-gradient(135deg, #0f3460 0%, #1a1a2e 100%);
+            color: white; border: none; border-radius: 10px; font-size: 15px;
+            cursor: pointer; font-weight: bold; letter-spacing: 2px; transition: all 0.3s;
+        }
+        .login-btn:hover { opacity: 0.9; }
+        .login-error { color: #e74c3c; font-size: 13px; margin-top: 10px; display: none; }
+
+        /* 主页面 */
+        .main-page { display: none; flex-direction: column; flex: 1; }
+        .header {
+            display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 15px; flex-wrap: wrap; gap: 8px;
+            padding-bottom: 12px; border-bottom: 1px solid #e0e0e0;
+        }
+        .header h1 { font-size: 20px; color: #1a1a2e; }
+        .header-right { display: flex; align-items: center; gap: 10px; font-size: 13px; color: #555; }
+        .logout-btn {
+            background: #e74c3c; color: white; border: none; padding: 7px 16px;
+            border-radius: 8px; cursor: pointer; font-size: 12px; transition: opacity 0.3s;
+        }
+        .logout-btn:hover { opacity: 0.85; }
+
+        /* 左右分栏 */
+        .main-content {
+            display: flex;
+            flex: 1;
+            gap: 25px;
+            min-height: 0;
+        }
+        .left-panel {
+            flex: 1;
+            min-width: 300px;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        .right-panel {
+            flex: 1.2;
+            min-width: 350px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .upload-area {
+            border: 2px dashed #0f3460;
+            border-radius: 14px;
+            padding: 30px 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            background: #f8f9fc;
+        }
+        .upload-area:hover { border-color: #1a1a2e; background: #eef1f8; }
+        .upload-area .icon { font-size: 36px; margin-bottom: 6px; }
+        .upload-area .hint { font-size: 12px; color: #aaa; margin-top: 4px; }
+        #fileInput { display: none; }
+
+        .scale-row {
+            display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+            background: #f8f9fc; padding: 12px; border-radius: 10px;
+        }
+        .scale-row label { font-size: 13px; color: #555; white-space: nowrap; }
+        .scale-row input {
+            flex: 1; padding: 9px 12px; border: 2px solid #e0e0e0;
+            border-radius: 8px; font-size: 13px; min-width: 100px;
+        }
+        .scale-row input:focus { border-color: #0f3460; outline: none; }
+        .scale-row .unit { font-size: 12px; color: #888; white-space: nowrap; }
+
+        .btn-analyze {
+            padding: 13px;
+            background: linear-gradient(135deg, #0f3460 0%, #1a1a2e 100%);
+            color: white; border: none; border-radius: 10px; font-size: 15px;
+            cursor: pointer; font-weight: bold; letter-spacing: 2px;
+            display: none; transition: all 0.3s;
+        }
+        .btn-analyze:hover { opacity: 0.9; }
+        .btn-analyze:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        .loading {
+            text-align: center; color: #0f3460; font-weight: bold;
+            display: none; padding: 10px;
+        }
+        .spinner {
+            display: inline-block; width: 16px; height: 16px;
+            border: 2px solid #e0e0e0; border-top: 2px solid #0f3460;
+            border-radius: 50%; animation: spin 0.8s linear infinite;
+            margin-right: 6px; vertical-align: middle;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        #result {
+            flex: 1;
+            padding: 18px;
+            border-radius: 10px;
+            display: none;
+            background: #f8f9fc;
+            border-left: 4px solid #0f3460;
+            overflow-y: auto;
+            max-height: 60vh;
+            min-height: 200px;
+        }
+        #result.success { background: #f0faf0; border-left-color: #27ae60; }
+        #result.error { background: #fff0f0; border-left-color: #e74c3c; color: #c0392b; }
+        .result-summary { font-size: 15px; font-weight: bold; color: #1a1a2e; margin-bottom: 10px; }
+        .result-image {
+            max-width: 100%;
+            height: auto;
+            display: block;
+            margin: 10px 0;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .particle-table {
+            width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px;
+        }
+        .particle-table th, .particle-table td {
+            padding: 6px 5px; border-bottom: 1px solid #e0e0e0; text-align: center;
+        }
+        .particle-table th { background: #eef1f8; font-weight: bold; }
+
+        .admin-panel {
+            display: none; margin-top: 15px; padding: 15px;
+            background: #fff; border-radius: 10px; border: 1px solid #e0e0e0;
+        }
+        .admin-panel h3 { margin-bottom: 8px; color: #1a1a2e; font-size: 14px; }
+        .page-btn {
+            padding: 4px 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            background: #fff;
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.2s;
+        }
+        .page-btn:hover:not(:disabled) {
+            background: #0f3460;
+            color: #fff;
+            border-color: #0f3460;
+        }
+        .page-btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+        .page-btn.active {
+            background: #0f3460;
+            color: #fff;
+            border-color: #0f3460;
+        }
+        
+        .admin-table {
+            width: 100%; border-collapse: collapse; font-size: 12px;
+        }
+        .admin-table th, .admin-table td {
+            padding: 6px 8px; text-align: left; border-bottom: 1px solid #e0e0e0;
+        }
+        .admin-table th { background: #f8f9fc; }
+        
+        @media (max-width: 768px) {
+            .main-content { flex-direction: column; }
+            .left-panel, .right-panel { min-width: auto; }
+        }
+        #invitePanel {
+            display: none;
+        }
+        .invite-panel {
+            margin-top: 15px;
+            padding: 15px;
+            background: #fff;
+            border-radius: 10px;
+            border: 1px solid #e0e0e0;
+        }
+        .invite-panel h4 {
+            margin-bottom: 8px;
+            color: #1a1a2e;
+            font-size: 14px;
+        }
+        .invite-panel .generate-area {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .invite-panel .generate-area input {
+            flex: 1;
+            min-width: 60px;
+            max-width: 80px;
+            padding: 6px 10px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 13px;
+        }
+        .invite-panel .gen-btn {
+            padding: 6px 16px;
+            background: #27ae60;
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        .invite-panel .gen-btn:hover {
+            background: #219a52;
+        }
+        .invite-panel .invite-result {
+            margin-top: 10px;
+            padding: 10px;
+            background: #f8f9fc;
+            border-radius: 6px;
+            font-size: 13px;
+            word-break: break-all;
+            display: none;
+        }
+        .invite-panel .invite-result .code-item {
+            display: inline-block;
+            background: #0f3460;
+            color: #fff;
+            padding: 4px 12px;
+            border-radius: 4px;
+            margin: 3px 5px 3px 0;
+            font-family: monospace;
+            font-size: 14px;
+            letter-spacing: 1px;
+        }
+        .invite-panel .invite-list {
+            margin-top: 10px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .invite-panel .invite-list table {
+            width: 100%;
+            font-size: 12px;
+            border-collapse: collapse;
+        }
+        .invite-panel .invite-list th,
+        .invite-panel .invite-list td {
+            padding: 4px 8px;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }
+        .invite-panel .invite-list th {
+            background: #f8f9fc;
+        }
+        .invite-panel .status-used {
+            color: #e74c3c;
+        }
+        .invite-panel .status-unused {
+            color: #27ae60;
+        }
+        .invite-panel .invite-pagination {
+            display: flex;
+            gap: 5px;
+            justify-content: center;
+            margin-top: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- 登录页 -->
+        <div id="loginPage" class="login-box">
+            <div class="logo">🔬</div>
+            <h1>SEM 颗粒智能分析系统</h1>
+            <p class="subtitle">请输入账号密码登录</p>
+            <input type="text" id="username" placeholder="用户名" autocomplete="off">
+            <input type="password" id="password" placeholder="密码">
+            <button class="login-btn" onclick="login()">登 录</button>
+            <p class="login-error" id="loginError">用户名或密码错误，请重试</p>
+            <p style="margin-top: 15px; font-size: 13px; color: #888;">还没有账号？<a href="#" onclick="showRegister()" style="color: #0f3460;">立即注册</a></p>
+        </div>
+        
+        <!-- 注册页 -->
+        <div id="registerPage" class="login-box" style="display: none;">
+            <div class="logo">📝</div>
+            <h1>注册新账号</h1>
+            <p class="subtitle">需要有效的邀请码才能注册</p>
+            <input type="text" id="regUsername" placeholder="用户名（至少3个字符）">
+            <input type="password" id="regPassword" placeholder="密码（至少6个字符）">
+            <input type="text" id="regInviteCode" placeholder="邀请码">
+            <button class="login-btn" onclick="register()">注 册</button>
+            <p class="login-error" id="registerError">注册失败，请检查信息</p>
+            <p style="margin-top: 15px; font-size: 13px; color: #888;"><a href="#" onclick="showLogin()" style="color: #0f3460;">返回登录</a></p>
+        </div>
+
+        <!-- 主页面 -->
+        <div id="mainPage" class="main-page">
+            <div class="header">
+                <h1>🔬 SEM 颗粒智能分析系统</h1>
+                <div class="header-right">
+                    <span id="welcomeUser"></span>
+                    <button class="logout-btn" onclick="logout()">退出登录</button>
+                </div>
+            </div>
+
+            <div class="main-content">
+                <!-- 左侧面板 -->
+                <div class="left-panel">
+                    <div class="upload-area" id="uploadArea">
+                        <div class="icon">📁</div>
+                        <div>点击或拖拽上传图片</div>
+                        <div class="hint">支持 PNG、JPG、TIF、BMP</div>
+                    </div>
+                    <input type="file" id="fileInput" accept=".png,.jpg,.jpeg,.tif,.tiff,.bmp">
+
+                    <div class="scale-row">
+                        <label>📏 比例尺：1像素 =</label>
+                        <input type="number" id="scaleRatio" placeholder="默认10" step="any" min="0">
+                        <span class="unit">纳米</span>
+                    </div>
+                    
+                    
+                    <div class="admin-panel" id="adminPanel">
+                        <h3>👑 超级管理员面板 - 用户列表</h3>
+                        <div id="userListContainer">
+                            <table class="admin-table">
+                                <thead><tr><th>ID</th><th>用户名</th><th>角色</th><th>注册时间</th></tr></thead>
+                                <tbody id="userTableBody">
+                                    <!-- 动态渲染 -->
+                                </tbody>
+                            </table>
+                            <div id="pagination" style="display: flex; justify-content: space-between; align-items: center; margin-top: 10px; gap: 10px; flex-wrap: wrap;">
+                                <div id="pageInfo" style="font-size: 13px; color: #888;"></div>
+                                <div style="display: flex; gap: 5px;">
+                                    <button id="prevPageBtn" class="page-btn" onclick="loadUsers(currentPage - 1)">上一页</button>
+                                    <span id="pageNumbers" style="display: flex; gap: 4px; align-items: center;"></span>
+                                    <button id="nextPageBtn" class="page-btn" onclick="loadUsers(currentPage + 1)">下一页</button>
+                                </div>
+                            </div>
+                            <div id="userListLoading" style="text-align: center; padding: 10px; color: #888; display: none;">加载中...</div>
+                            <div id="userListError" style="text-align: center; padding: 10px; color: #e74c3c; display: none;">加载失败</div>
+                        </div>
+                    </div>
+
+                    <div class="invite-panel" id="invitePanel">
+                        <h4>🎫 邀请码管理</h4>
+                        <div class="generate-area">
+                            <span style="font-size:13px;color:#555;">生成数量：</span>
+                            <input type="number" id="inviteCount" value="1" min="1" max="10">
+                            <button class="gen-btn" onclick="generateInviteCodes()">✨ 生成邀请码</button>
+                            <button class="gen-btn" style="background:#3498db;" onclick="loadInviteCodes(1)">📋 查看所有邀请码</button>
+                        </div>
+                        <div class="invite-result" id="inviteResult"></div>
+                        <div class="invite-list" id="inviteListContainer" style="display:none;">
+                            <table>
+                                <thead><tr><th>邀请码</th><th>状态</th><th>使用者</th><th>生成时间</th></tr></thead>
+                                <tbody id="inviteTableBody"></tbody>
+                            </table>
+                            <div class="invite-pagination">
+                                <button id="invitePrevBtn" class="page-btn" onclick="loadInviteCodes(inviteCurrentPage - 1)">上一页</button>
+                                <span id="invitePageInfo" style="font-size:12px;color:#888;"></span>
+                                <button id="inviteNextBtn" class="page-btn" onclick="loadInviteCodes(inviteCurrentPage + 1)">下一页</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <button class="btn-analyze" id="analyzeBtn" disabled>🔍 开始分析</button>
+                    <div class="loading" id="loading"><span class="spinner"></span>正在分析中...</div>
+                </div>
+
+                <!-- 右侧面板 -->
+                <div class="right-panel">
+                    <div id="result"></div>
+                    
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        
+        const API_URL = "/api/analyze_plain";
+        let currentUser = null;
+        // 用户列表分页状态
+        let currentPage = 1;
+        const PAGE_LIMIT = 5;
+        // 邀请码分页状态
+        let inviteCurrentPage = 1;
+        const INVITE_PAGE_LIMIT = 10;
+
+        async function login() {
+            const username = document.getElementById("username").value.trim();
+            const password = document.getElementById("password").value;
+            const loginError = document.getElementById("loginError");
+            
+            try {
+                const response = await fetch("/api/login", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ username, password })
+                });
+                const data = await response.json();
+                if (data.success) {
+                    currentUser = { username: data.username, role: data.role };
+                    loginError.style.display = "none";
+                    showMainPage();
+                } else {
+                    loginError.style.display = "block";
+                }
+            } catch (error) {
+                loginError.style.display = "block";
+                loginError.innerText = "服务器连接失败";
+            }
+        }
+        
+        function showRegister() {
+            document.getElementById("loginPage").style.display = "none";
+            document.getElementById("registerPage").style.display = "block";
+        }
+
+        function showLogin() {
+            document.getElementById("registerPage").style.display = "none";
+            document.getElementById("loginPage").style.display = "block";
+        }
+
+        async function register() {
+            const username = document.getElementById("regUsername").value.trim();
+            const password = document.getElementById("regPassword").value;
+            const inviteCode = document.getElementById("regInviteCode").value.trim();
+            const registerError = document.getElementById("registerError");
+            
+            try {
+                const response = await fetch("/api/register", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ username, password, invite_code: inviteCode })
+                });
+                const data = await response.json();
+                if (data.success) {
+                    alert("注册成功！请返回登录");
+                    showLogin();
+                } else {
+                    registerError.style.display = "block";
+                    registerError.innerText = data.message || "注册失败";
+                }
+            } catch (error) {
+                registerError.style.display = "block";
+                registerError.innerText = "服务器连接失败";
+            }
+        }
+
+        function showMainPage() {
+            document.getElementById("loginPage").style.display = "none";
+            document.getElementById("mainPage").style.display = "flex";
+            document.getElementById("welcomeUser").innerText = `欢迎，${currentUser.username}`;
+            
+            // 根据用户角色显示/隐藏管理员面板
+            if (currentUser.role === "admin") {
+                document.getElementById("adminPanel").style.display = "block";
+                document.getElementById("invitePanel").style.display = "block";
+                loadUsers(1);
+                loadInviteCodes(1);
+            } else {
+                document.getElementById("adminPanel").style.display = "none";
+                document.getElementById("invitePanel").style.display = "none";
+            }
+        }
+
+        function logout() {
+            currentUser = null;
+            document.getElementById("loginPage").style.display = "block";
+            document.getElementById("mainPage").style.display = "none";
+            document.getElementById("username").value = "";
+            document.getElementById("password").value = "";
+            document.getElementById("adminPanel").style.display = "none";
+            document.getElementById("registerPage").style.display = "none";
+            document.getElementById("loginPage").style.display = "block";
+            resetUpload();
+        }
+
+        document.getElementById("password").addEventListener("keypress", function(e) {
+            if (e.key === "Enter") login();
+        });
+
+        const uploadArea = document.getElementById("uploadArea");
+        const fileInput = document.getElementById("fileInput");
+        const analyzeBtn = document.getElementById("analyzeBtn");
+        const loading = document.getElementById("loading");
+        const result = document.getElementById("result");
+        let selectedFile = null;
+
+        uploadArea.addEventListener("click", () => fileInput.click());
+        uploadArea.addEventListener("dragover", e => e.preventDefault());
+        uploadArea.addEventListener("drop", e => {
+            e.preventDefault();
+            if (e.dataTransfer.files.length > 0) handleFile(e.dataTransfer.files[0]);
+        });
+        fileInput.addEventListener("change", e => {
+            if (e.target.files.length > 0) handleFile(e.target.files[0]);
+        });
+
+        function handleFile(file) {
+            selectedFile = file;
+            analyzeBtn.style.display = "block";
+            analyzeBtn.disabled = false;
+            result.style.display = "none";
+        }
+
+        analyzeBtn.addEventListener("click", async () => {
+            if (!selectedFile) return;
+            analyzeBtn.disabled = true;
+            loading.style.display = "block";
+            result.style.display = "none";
+
+            try {
+                const formData = new FormData();
+                formData.append("file", selectedFile);
+                const scaleInput = document.getElementById("scaleRatio").value;
+                formData.append("scale_ratio", scaleInput || "10");
+
+                const response = await fetch(API_URL, { method: "POST", body: formData });
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+                const data = await response.json();
+                renderResult(data);
+            } catch (error) {
+                result.className = "error";
+                result.innerHTML = `<strong>❌ 分析失败</strong><p>${error.message}</p>`;
+                result.style.display = "block";
+            } finally {
+                analyzeBtn.disabled = false;
+                loading.style.display = "none";
+            }
+        });
+
+        function renderResult(data) {
+            const total = data.total_count ?? data.total_particles ?? 0;
+            const particles = data.particle_data ?? data.particles ?? [];
+
+            let html = `<div class="result-summary">✅ 分析完成 · 共检测到 <strong>${total}</strong> 个颗粒</div>`;
+
+            if (data.average_nm) {
+                html += `<p style="font-size:13px;color:#555;margin-bottom:10px;">
+                    平均直径: ${data.average_nm.toFixed(2)} nm | D50: ${data.d50_nm.toFixed(2)} nm |
+                    最小: ${data.min_nm.toFixed(2)} nm | 最大: ${data.max_nm.toFixed(2)} nm
+                </p>`;
+            }
+
+            if (data.annotated_image_base64) {
+                html += `<img class="result-image" src="data:image/jpeg;base64,${data.annotated_image_base64}" alt="标注结果图">`;
+            }
+
+            if (particles.length > 0) {
+                html += `<table class="particle-table">
+                    <thead><tr><th>编号</th><th>直径 (nm)</th><th>圆度</th></tr></thead><tbody>`;
+                particles.forEach(p => {
+                    html += `<tr>
+                        <td>${p.id}</td>
+                        <td>${p.diameter_nm?.toFixed(2) || '-'}</td>
+                        <td>${p.completeness?.toFixed(4) || '-'}</td>
+                    </tr>`;
+                });
+                html += `</tbody></table>`;
+            }
+
+            result.className = "success";
+            result.innerHTML = html;
+            result.style.display = "block";
+        }
+
+        function resetUpload() {
+            selectedFile = null;
+            analyzeBtn.style.display = "none";
+            result.style.display = "none";
+            document.getElementById("scaleRatio").value = "";
+        }
+        
+        async function loadUsers(page) {
+            if (!currentUser || currentUser.role !== "admin") return;
+            
+            document.getElementById("userListLoading").style.display = "block";
+            document.getElementById("userListError").style.display = "none";
+            document.getElementById("userTableBody").innerHTML = "";
+            document.getElementById("prevPageBtn").disabled = true;
+            document.getElementById("nextPageBtn").disabled = true;
+            
+            try {
+                const response = await fetch("/api/admin/users", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        username: currentUser.username,
+                        page: page,
+                        limit: PAGE_LIMIT
+                    })
+                });
+                const data = await response.json();
+                
+                if (data.success) {
+                    currentPage = data.page;
+                    renderUsers(data);
+                    renderPagination(data);
+                } else {
+                    document.getElementById("userListError").style.display = "block";
+                    document.getElementById("userListError").innerText = data.message || "加载失败";
+                }
+            } catch (error) {
+                document.getElementById("userListError").style.display = "block";
+                document.getElementById("userListError").innerText = "网络错误，请重试";
+            } finally {
+                document.getElementById("userListLoading").style.display = "none";
+                document.getElementById("prevPageBtn").disabled = false;
+                document.getElementById("nextPageBtn").disabled = false;
+            }
+        }
+        
+        function renderUsers(data) {
+            const tbody = document.getElementById("userTableBody");
+            if (!data.data || data.data.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;color:#888;padding:15px;">暂无用户</td></tr>`;
+                return;
+            }
+            
+            tbody.innerHTML = data.data.map(user => `
+                <tr>
+                    <td>${user.id}</td>
+                    <td>${user.username}</td>
+                    <td>${user.role === 'admin' ? '👑 超级管理员' : '👤 普通用户'}</td>
+                    <td>${user.created_at || '-'}</td>
+                </tr>
+            `).join('');
+        }
+        
+        function renderPagination(data) {
+            const totalPages = data.total_pages;
+            const current = data.page;
+            
+            document.getElementById("pageInfo").innerText = `共 ${data.total} 个用户，第 ${current}/${totalPages} 页`;
+            
+            let pageHtml = '';
+            let startPage = Math.max(1, current - 3);
+            let endPage = Math.min(totalPages, current + 3);
+            
+            if (startPage > 1) {
+                pageHtml += `<button class="page-btn" onclick="loadUsers(1)">1</button>`;
+                if (startPage > 2) pageHtml += `<span style="color:#888;">...</span>`;
+            }
+            
+            for (let i = startPage; i <= endPage; i++) {
+                pageHtml += `<button class="page-btn ${i === current ? 'active' : ''}" onclick="loadUsers(${i})">${i}</button>`;
+            }
+            
+            if (endPage < totalPages) {
+                if (endPage < totalPages - 1) pageHtml += `<span style="color:#888;">...</span>`;
+                pageHtml += `<button class="page-btn" onclick="loadUsers(${totalPages})">${totalPages}</button>`;
+            }
+            
+            document.getElementById("pageNumbers").innerHTML = pageHtml;
+            
+            document.getElementById("prevPageBtn").disabled = current <= 1;
+            document.getElementById("nextPageBtn").disabled = current >= totalPages;
+        }
+        
+        async function generateInviteCodes() {
+            if (!currentUser || currentUser.role !== "admin") {
+                alert("权限不足");
+                return;
+            }
+            
+            const countInput = document.getElementById("inviteCount");
+            let count = parseInt(countInput.value) || 1;
+            if (count < 1) count = 1;
+            if (count > 10) count = 10;
+            countInput.value = count;
+            
+            const resultDiv = document.getElementById("inviteResult");
+            resultDiv.style.display = "block";
+            resultDiv.innerHTML = "⏳ 生成中...";
+            
+            try {
+                const response = await fetch("/api/admin/generate_invite", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        username: currentUser.username,
+                        count: count
+                    })
+                });
+                const data = await response.json();
+                
+                if (data.success) {
+                    const codesHtml = data.codes.map(c => `<span class="code-item">${c}</span>`).join('');
+                    resultDiv.innerHTML = `
+                        <div style="margin-bottom:6px;color:#27ae60;">✅ ${data.message}</div>
+                        <div>${codesHtml}</div>
+                        <div style="margin-top:6px;font-size:12px;color:#888;">💡 复制这些邀请码分发给用户</div>
+                    `;
+                    // 自动刷新邀请码列表
+                    loadInviteCodes(1);
+                } else {
+                    resultDiv.innerHTML = `<span style="color:#e74c3c;">❌ ${data.message}</span>`;
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `<span style="color:#e74c3c;">❌ 网络错误，请重试</span>`;
+            }
+        }
+        
+        async function loadInviteCodes(page) {
+            if (!currentUser || currentUser.role !== "admin") return;
+            
+            const container = document.getElementById("inviteListContainer");
+            const tbody = document.getElementById("inviteTableBody");
+            const loading = document.getElementById("inviteResult");
+            
+            container.style.display = "block";
+            tbody.innerHTML = "<tr><td colspan='4' style='text-align:center;color:#888;'>加载中...</td></tr>";
+            document.getElementById("invitePrevBtn").disabled = true;
+            document.getElementById("inviteNextBtn").disabled = true;
+            
+            try {
+                const response = await fetch("/api/admin/invite_codes", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        username: currentUser.username,
+                        page: page,
+                        limit: INVITE_PAGE_LIMIT
+                    })
+                });
+                const data = await response.json();
+                
+                if (data.success) {
+                    inviteCurrentPage = data.page;
+                    renderInviteCodes(data);
+                } else {
+                    tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;color:#e74c3c;">${data.message}</td></tr>`;
+                }
+            } catch (error) {
+                tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;color:#e74c3c;">网络错误</td></tr>`;
+            } finally {
+                document.getElementById("invitePrevBtn").disabled = false;
+                document.getElementById("inviteNextBtn").disabled = false;
+            }
+        }
+        
+        function renderInviteCodes(data) {
+            const tbody = document.getElementById("inviteTableBody");
+            const totalPages = data.total_pages;
+            const current = data.page;
+            
+            if (!data.data || data.data.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;color:#888;padding:15px;">暂无邀请码</td></tr>`;
+            } else {
+                tbody.innerHTML = data.data.map(item => {
+                    const isUsed = item.used_by !== null;
+                    const statusText = isUsed ? '已使用' : '✅ 可用';
+                    const statusClass = isUsed ? 'status-used' : 'status-unused';
+                    return `
+                        <tr>
+                            <td><code style="background:#f0f0f0;padding:2px 8px;border-radius:4px;">${item.code}</code></td>
+                            <td class="${statusClass}">${statusText}</td>
+                            <td>${item.used_by || '-'}</td>
+                            <td>${item.created_at || '-'}</td>
+                        </tr>
+                    `;
+                }).join('');
+            }
+            
+            document.getElementById("invitePageInfo").innerText = `第 ${current}/${totalPages} 页`;
+            document.getElementById("invitePrevBtn").disabled = current <= 1;
+            document.getElementById("inviteNextBtn").disabled = current >= totalPages;
+        }
+    </script>
+</body>
+</html>
