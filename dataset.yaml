@@ -1,4 +1,4 @@
-path: E:/SEMphoto/123456.v1i.yolov8
+path: E:/SEM photo.v1i.yolov8
 train: train/images
 val: valid/images
 test: test/images

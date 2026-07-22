@@ -105,6 +105,7 @@ mysql -u root -p sem_users < database/database_structure.sql
 
 ```bash
 D:\frp\frpc.exe -c D:\frp\frpc.toml
+frpc.exe -c frpc.toml
 ```
 
 ### 6.2 启动后端服务（本地执行）

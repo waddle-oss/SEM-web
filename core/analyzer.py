@@ -119,21 +119,55 @@ def get_model() -> Optional[YOLO]:
     return _model_instance
 
 
-def initialize_model(encrypted_path: str) -> YOLO:
+def get_model_path() -> Optional[str]:
+    """获取当前已加载模型的路径"""
+    return _encrypted_model_path
+
+
+def load_model_from_path(model_path: str) -> YOLO:
     """
-    初始化模型单例
+    按文件类型加载模型
+
+    - .encrypted: 走阅后即焚解密流程
+    - .pt / .onnx 等: 直接由 YOLO 加载明文权重
+    """
+    if not ULTRALYTICS_AVAILABLE:
+        raise ImportError("需要安装 ultralytics: pip install ultralytics")
+
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"模型文件不存在: {model_path}")
+
+    if model_path.lower().endswith(".encrypted"):
+        return load_model_securely(model_path)
+
+    print(f"[模型加载] 加载明文权重: {model_path}")
+    model = YOLO(model_path)
+    print("[模型加载] ✓ 模型加载成功")
+    return model
+
+
+def initialize_model(model_path: str, force: bool = False) -> YOLO:
+    """
+    初始化/切换模型单例
 
     Args:
-        encrypted_path: 加密模型文件路径
+        model_path: 模型文件路径（.encrypted / .pt / .onnx）
+        force: True 时强制重新加载（用于前端切换模型）
 
     Returns:
         YOLO 模型对象
     """
     global _model_instance, _encrypted_model_path
 
-    if _model_instance is None:
-        _model_instance = load_model_securely(encrypted_path)
-        _encrypted_model_path = encrypted_path
+    need_reload = (
+        force
+        or _model_instance is None
+        or _encrypted_model_path != model_path
+    )
+
+    if need_reload:
+        _model_instance = load_model_from_path(model_path)
+        _encrypted_model_path = model_path
 
     return _model_instance
 
@@ -145,10 +179,15 @@ def initialize_model(encrypted_path: str) -> YOLO:
 def analyze_particles(
     image_bytes: bytes,
     scale_ratio: float = None,
-    use_mock: bool = True
+    use_mock: bool = True,
+    completeness_threshold: float = 0.8,
+    edge_tolerance: int = 5,
+    min_area: float = 100,
+    max_area=None,
+    exclude_edge_particles: bool = True
 ) -> dict:
     """
-    分析SEM图像中的颗粒
+    分析SEM图像中的颗粒（V2.1.1：参数真实生效）
 
     流程:
     1. cv2.imdecode 读取图片
@@ -166,19 +205,31 @@ def analyze_particles(
         scale_ratio: 像素到纳米的转换比例 (1像素 = X nm)，可选
                       如果为 None 或 <= 0，则自动从图片OCR提取
         use_mock: 是否使用模拟数据（无模型时）
+        completeness_threshold: 完整度阈值 [0, 1]，默认 0.8
+        edge_tolerance: 边缘容差 px，默认 5
+        min_area: 最小像素面积阈值，默认 100
+        max_area: 最大像素面积阈值，None 表示不限制
+        exclude_edge_particles: 是否排除边缘颗粒，默认 True
 
     Returns:
-        包含分析结果的字典:
+        包含分析结果的字典（同时返回 filter_params 用于可复现追溯）:
         {
-            "total_count": int,
+            "total_count": int,            # == valid_count 兼容旧前端
+            "valid_count": int,
+            "excluded_count": int,
+            "total_detected": int,          # == valid_count + excluded_count
             "average_nm": float,
             "d50_nm": float,
             "std_dev": float,
             "min_nm": float,
             "max_nm": float,
-            "scale_ratio": float,      # 实际使用的比例尺
-            "scale_source": str,       # "user_provided" 或 "auto_extracted"
-            "particle_data": [...]
+            "scale_ratio": float,
+            "scale_source": str,
+            "particle_data": [...],
+            "excluded_particles": [...],
+            "exclusion_stats": {...},
+            "filter_params": {...},         # 实际使用的过滤参数（可复现）
+            "annotated_image_base64": str
         }
     """
     # Step 1: 解码图像
@@ -190,6 +241,8 @@ def analyze_particles(
 
     height, width = image.shape[:2]
     print(f"[分析] 图像尺寸: {width}x{height}")
+    print(f"[分析] 过滤参数: completeness>={completeness_threshold}, edge_tol={edge_tolerance}, "
+          f"min_area={min_area}, max_area={max_area}, exclude_edge={exclude_edge_particles}")
 
     # Step 2: 自动提取比例尺（如果未提供）
     if scale_ratio is None or scale_ratio <= 0:
@@ -222,60 +275,108 @@ def analyze_particles(
 
     print(f"[分析] 检测到轮廓数量: {len(contours)}")
 
-    # Step 3: 过滤和处理每个轮廓
+    # Step 3: 过滤和处理每个轮廓（V2.1.1 真实参数生效）
     valid_particles = []
-    border_tolerance = 5
-    min_completeness = 0.8
+    excluded_particles = []
+    edge_tol = int(edge_tolerance)
+    min_area_threshold = float(min_area)
+    max_area_threshold = float(max_area) if max_area not in (None, 0) else None
 
     for i, contour in enumerate(contours):
-        # 3.1 边缘检测：任何像素点触碰图像四壁则丢弃
-        if _is_on_image_border(contour, width, height, border_tolerance):
-            continue
+        # 3.0 计算面积 / 质心 / 包围盒 / 边缘判定（必须在过滤前全部算好）
+        actual_area = float(cv2.contourArea(contour))
 
-        # 3.2 计算实际面积
-        actual_area = cv2.contourArea(contour)
-
-        # 3.3 计算质心
         M = cv2.moments(contour)
         if M["m00"] != 0:
             cx = M["m10"] / M["m00"]
             cy = M["m01"] / M["m00"]
         else:
-            cx, cy = 0, 0
+            cx, cy = 0.0, 0.0
 
-        # 3.4 计算轮廓上所有点到质心的平均距离（作为半径）
+        bx, by, bw, bh = cv2.boundingRect(contour)
+        # touches_edge 判定：包围盒任一边在容差内
+        touches_edge = (
+            bx <= edge_tol
+            or by <= edge_tol
+            or (bx + bw) >= width - edge_tol
+            or (by + bh) >= height - edge_tol
+        )
+
+        # 3.x 过滤顺序：small_area → large_area → edge → low_completeness
+        exclude_reason = None
+
+        if actual_area < min_area_threshold:
+            exclude_reason = "small_area"
+        elif max_area_threshold is not None and actual_area > max_area_threshold:
+            exclude_reason = "large_area"
+        elif exclude_edge_particles and touches_edge:
+            exclude_reason = "edge"
+        else:
+            # 完整度计算
+            distances = []
+            for point in contour:
+                px, py = point[0]
+                distances.append(math.sqrt((px - cx) ** 2 + (py - cy) ** 2))
+            radius = float(np.mean(distances)) if distances else 0.0
+            theoretical_area = math.pi * radius * radius
+            completeness = actual_area / theoretical_area if theoretical_area > 0 else 0
+
+            if completeness < completeness_threshold:
+                exclude_reason = "low_completeness"
+
+        if exclude_reason:
+            excluded_particles.append(_build_excluded_record_v211(
+                contour, scale_ratio, exclude_reason,
+                actual_area=actual_area, cx=cx, cy=cy,
+                bbox=(bx, by, bw, bh), touches_edge=touches_edge
+            ))
+            continue
+
+        # 通过过滤：构造有效颗粒
+        # 此处再次计算 radius/completeness（上面分支可能没算；radius 仅用于完整度几何）
         distances = []
         for point in contour:
             px, py = point[0]
-            dist = np.sqrt((px - cx)**2 + (py - cy)**2)
-            distances.append(dist)
-        radius = np.mean(distances)
-
-        # 3.5 计算理论面积（外接圆面积）
+            distances.append(math.sqrt((px - cx) ** 2 + (py - cy) ** 2))
+        radius = float(np.mean(distances)) if distances else 0.0
         theoretical_area = math.pi * radius * radius
-
-        # 3.6 计算完整度
         completeness = actual_area / theoretical_area if theoretical_area > 0 else 0
 
-        # 3.7 完整度过滤：丢弃 < 0.8 的颗粒
-        if completeness < min_completeness:
-            continue
-
-        # 3.8 转换为物理尺寸
         diameter_pixels = 2 * radius
         diameter_nm = diameter_pixels * scale_ratio
+        avg_diameter_nm = float(diameter_nm)
+        eq_diameter_px = 2 * math.sqrt(actual_area / math.pi) if actual_area > 0 else 0.0
+        eq_diameter_nm = float(eq_diameter_px * scale_ratio)
+
+        perimeter = cv2.arcLength(contour, True)
+        # 圆度 = 4πA / P²（完美圆为 1）
+        roundness = (4 * math.pi * actual_area / (perimeter ** 2)) if perimeter > 0 else None
 
         valid_particles.append({
             "id": len(valid_particles) + 1,
             "x": float(cx),
             "y": float(cy),
-            "radius_pixels": float(radius),
-            "diameter_nm": float(diameter_nm),
+            "area_pixels": round(actual_area, 3),
+            "diameter_pixels": float(diameter_pixels),
+            "avg_diameter_nm": round(avg_diameter_nm, 3),
+            "eq_diameter_nm": round(eq_diameter_nm, 3),
+            "diameter_nm": round(float(diameter_nm), 3),
             "completeness": round(completeness, 4),
-            "segments": contour.reshape(-1, 2).tolist()  #多边形
+            "roundness": round(float(roundness), 4) if roundness is not None else None,
+            "circularity": round(float(roundness), 4) if roundness is not None else None,
+            "bbox": [int(bx), int(by), int(bw), int(bh)],
+            "touches_edge": bool(touches_edge),
+            "confidence": None,
+            "status": "valid",
+            "exclude_reason": None,
+            "segments": contour.reshape(-1, 2).tolist()
         })
 
     print(f"[分析] 有效颗粒数量: {len(valid_particles)}")
+
+    # 给排除颗粒补 id
+    for idx, p in enumerate(excluded_particles, start=len(valid_particles) + 1):
+        p["id"] = idx
 
     # Step 4: 统计计算
     stats = _calculate_statistics(valid_particles)
@@ -307,17 +408,43 @@ def analyze_particles(
 
     print(f"[分析] 使用用户提供的比例尺: 1像素 = {scale_ratio:.4f} nm")
 
+    # 引入统一异常避免循环依赖
+    from core.stats import build_exclusion_stats
+
+    valid_count = stats["total_count"]
+    excluded_count = len(excluded_particles)
+    total_detected = valid_count + excluded_count
     return {
-        "total_count": stats["total_count"],
+        # 统计口径：直径(nm)
+        "total_count": valid_count,   # == valid_count，兼容旧前端
         "average_nm": stats["average_nm"],
+        "average_diameter_nm": stats["average_diameter_nm"],
         "d50_nm": stats["d50_nm"],
         "std_dev": stats["std_dev"],
         "min_nm": stats["min_nm"],
         "max_nm": stats["max_nm"],
-        "scale_ratio": round(scale_ratio, 6),  # 实际使用的比例尺
-        "scale_source": scale_source,          # 来源: user_provided 或 auto_extracted
+        "min_diameter_nm": stats["min_diameter_nm"],
+        "max_diameter_nm": stats["max_diameter_nm"],
+        "avg_roundness": stats["avg_roundness"],
+        "scale_ratio": round(scale_ratio, 6),
+        "scale_source": scale_source,
         "particle_data": valid_particles,
         "annotated_image_base64": annotated_base64,
+        # V2.1 新增字段
+        "success": True,
+        "total_detected": total_detected,
+        "valid_count": valid_count,
+        "excluded_count": excluded_count,
+        "excluded_particles": excluded_particles,
+        "exclusion_stats": build_exclusion_stats(excluded_particles),
+        # V2.1.1 新增：实际使用的过滤参数（可复现追溯）
+        "filter_params": {
+            "completeness_threshold": float(completeness_threshold),
+            "edge_tolerance": int(edge_tolerance),
+            "min_area": float(min_area),
+            "max_area": (float(max_area) if max_area not in (None, 0) else None),
+            "exclude_edge_particles": bool(exclude_edge_particles)
+        }
     }
 
 
@@ -442,6 +569,128 @@ def _is_on_image_border(
     return False
 
 
+def _build_excluded_record(
+    contour,
+    scale_ratio: float,
+    reason: str,
+    extra: dict = None
+) -> dict:
+    """
+    构造排除颗粒记录（V2.1 基础版）
+    """
+    extra = extra or {}
+    area = float(cv2.contourArea(contour))
+
+    M = cv2.moments(contour)
+    if M["m00"] != 0:
+        cx = M["m10"] / M["m00"]
+        cy = M["m01"] / M["m00"]
+    else:
+        cx, cy = 0.0, 0.0
+
+    distances = []
+    for point in contour:
+        px, py = point[0]
+        distances.append(math.sqrt((px - cx) ** 2 + (py - cy) ** 2))
+    radius = float(np.mean(distances)) if distances else 0.0
+    diameter_pixels = 2 * radius
+    diameter_nm = diameter_pixels * scale_ratio
+    avg_diameter_nm = diameter_nm
+    eq_diameter_px = 2 * math.sqrt(area / math.pi) if area > 0 else 0.0
+    eq_diameter_nm = eq_diameter_px * scale_ratio
+
+    bx, by, bw, bh = cv2.boundingRect(contour)
+    perimeter = cv2.arcLength(contour, True)
+    roundness = (4 * math.pi * area / (perimeter ** 2)) if perimeter > 0 else None
+
+    return {
+        "x": float(cx),
+        "y": float(cy),
+        "area_pixels": round(area, 3),
+        "diameter_pixels": round(diameter_pixels, 3),
+        "avg_diameter_nm": round(float(avg_diameter_nm), 3),
+        "eq_diameter_nm": round(float(eq_diameter_nm), 3),
+        "diameter_nm": round(float(diameter_nm), 3),
+        "completeness": extra.get("completeness"),
+        "roundness": round(float(roundness), 4) if roundness is not None else None,
+        "circularity": round(float(roundness), 4) if roundness is not None else None,
+        "bbox": [int(bx), int(by), int(bw), int(bh)],
+        "touches_edge": bool(extra.get("touches_edge", False)),
+        "confidence": None,
+        "status": "excluded",
+        "exclude_reason": reason,
+        "segments": contour.reshape(-1, 2).tolist() if contour is not None else []
+    }
+
+
+def _build_excluded_record_v211(
+    contour,
+    scale_ratio: float,
+    reason: str,
+    actual_area: float = None,
+    cx: float = None,
+    cy: float = None,
+    bbox=None,
+    touches_edge: bool = False
+) -> dict:
+    """
+    V2.1.1 排除颗粒记录（在主循环中预计算字段，避免重复计算）
+    """
+    if actual_area is None:
+        actual_area = float(cv2.contourArea(contour))
+    if cx is None or cy is None:
+        M = cv2.moments(contour)
+        if M["m00"] != 0:
+            cx = M["m10"] / M["m00"]
+            cy = M["m01"] / M["m00"]
+        else:
+            cx, cy = 0.0, 0.0
+    if bbox is None:
+        bx, by, bw, bh = cv2.boundingRect(contour)
+    else:
+        bx, by, bw, bh = bbox
+
+    distances = []
+    for point in contour:
+        px, py = point[0]
+        distances.append(math.sqrt((px - cx) ** 2 + (py - cy) ** 2))
+    radius = float(np.mean(distances)) if distances else 0.0
+    diameter_pixels = 2 * radius
+    diameter_nm = diameter_pixels * scale_ratio
+    avg_diameter_nm = diameter_nm
+    eq_diameter_px = 2 * math.sqrt(actual_area / math.pi) if actual_area > 0 else 0.0
+    eq_diameter_nm = eq_diameter_px * scale_ratio
+
+    perimeter = cv2.arcLength(contour, True)
+    roundness = (4 * math.pi * actual_area / (perimeter ** 2)) if perimeter > 0 else None
+
+    # 完整度（用于 low_completeness 排除颗粒的记录）
+    if radius > 0:
+        theoretical_area = math.pi * radius * radius
+        completeness = actual_area / theoretical_area if theoretical_area > 0 else 0
+    else:
+        completeness = None
+
+    return {
+        "x": float(cx),
+        "y": float(cy),
+        "area_pixels": round(actual_area, 3),
+        "diameter_pixels": round(diameter_pixels, 3),
+        "avg_diameter_nm": round(float(avg_diameter_nm), 3),
+        "eq_diameter_nm": round(float(eq_diameter_nm), 3),
+        "diameter_nm": round(float(diameter_nm), 3),
+        "completeness": round(float(completeness), 4) if completeness is not None else None,
+        "roundness": round(float(roundness), 4) if roundness is not None else None,
+        "circularity": round(float(roundness), 4) if roundness is not None else None,
+        "bbox": [int(bx), int(by), int(bw), int(bh)],
+        "touches_edge": bool(touches_edge),
+        "confidence": None,
+        "status": "excluded",
+        "exclude_reason": reason,
+        "segments": contour.reshape(-1, 2).tolist() if contour is not None else []
+    }
+
+
 def _calculate_statistics(particles: List[dict]) -> dict:
     """
     计算颗粒统计信息
@@ -456,30 +705,52 @@ def _calculate_statistics(particles: List[dict]) -> dict:
         return {
             "total_count": 0,
             "average_nm": 0.0,
+            "average_diameter_nm": 0.0,
             "d50_nm": 0.0,
             "std_dev": 0.0,
             "min_nm": 0.0,
-            "max_nm": 0.0
+            "max_nm": 0.0,
+            "min_diameter_nm": 0.0,
+            "max_diameter_nm": 0.0,
+            "avg_roundness": 0.0
         }
 
-    diameters = [p["diameter_nm"] for p in particles]
+    # 优先使用平均直径；兼容旧半径字段（×2）
+    diameters = []
+    for p in particles:
+        if p.get("avg_diameter_nm") is not None:
+            diameters.append(float(p["avg_diameter_nm"]))
+        elif p.get("diameter_nm") is not None:
+            diameters.append(float(p["diameter_nm"]))
+        elif p.get("avg_radius_nm") is not None:
+            diameters.append(float(p["avg_radius_nm"]) * 2.0)
     diameters_sorted = sorted(diameters)
 
     total_count = len(diameters)
-    average_nm = float(np.mean(diameters))
-    std_dev = float(np.std(diameters))
-    min_nm = float(min(diameters))
-    max_nm = float(max(diameters))
+    average_diameter_nm = float(np.mean(diameters)) if diameters else 0.0
+    std_dev = float(np.std(diameters)) if diameters else 0.0
+    min_diameter_nm = float(min(diameters)) if diameters else 0.0
+    max_diameter_nm = float(max(diameters)) if diameters else 0.0
+    median_idx = total_count // 2 if total_count else 0
+    d50_nm = diameters_sorted[median_idx] if diameters_sorted else 0.0
 
-    # D50: 中位径
-    median_idx = total_count // 2
-    d50_nm = diameters_sorted[median_idx]
+    roundness_vals = []
+    for p in particles:
+        if isinstance(p.get("roundness"), (int, float)):
+            roundness_vals.append(float(p["roundness"]))
+        elif isinstance(p.get("circularity"), (int, float)):
+            roundness_vals.append(float(p["circularity"]))
+    avg_roundness = float(np.mean(roundness_vals)) if roundness_vals else 0.0
 
     return {
         "total_count": total_count,
-        "average_nm": round(average_nm, 2),
+        "average_nm": round(average_diameter_nm, 2),
+        "average_diameter_nm": round(average_diameter_nm, 2),
         "d50_nm": round(d50_nm, 2),
         "std_dev": round(std_dev, 2),
-        "min_nm": round(min_nm, 2),
-        "max_nm": round(max_nm, 2)
+        "min_nm": round(min_diameter_nm, 2),
+        "max_nm": round(max_diameter_nm, 2),
+        "min_diameter_nm": round(min_diameter_nm, 2),
+        "max_diameter_nm": round(max_diameter_nm, 2),
+        "avg_roundness": round(avg_roundness, 4)
     }

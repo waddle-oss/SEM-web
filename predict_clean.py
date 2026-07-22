@@ -51,7 +51,7 @@ def calculate_completeness(contour) -> float:
     cx = M["m10"] / M["m00"]
     cy = M["m01"] / M["m00"]
 
-    # 计算平均半径
+    # 计算平均径向距离（用于完整度判定，理论圆面积 = πr²）
     distances = []
     for point in contour:
         px, py = point[0]

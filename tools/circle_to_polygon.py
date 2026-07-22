@@ -17,7 +17,7 @@ def convert_circle_to_polygon(json_path):
             edge = shape['points'][1]
 
             cx, cy = center[0], center[1]
-            # 计算半径: R = sqrt((x2-x1)^2 + (y2-y1)^2)
+            # 计算圆半径（几何变换用）: R = sqrt((x2-x1)^2 + (y2-y1)^2)
             radius = math.sqrt((edge[0] - cx) ** 2 + (edge[1] - cy) ** 2)
 
             # 生成 16 个多边形边缘点（这个数量对 YOLO 来说足够精准了）

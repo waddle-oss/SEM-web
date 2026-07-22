@@ -7,17 +7,93 @@
 2. OCR识别物理长度（如 "100 nm", "1 μm"）
 3. OpenCV二值化提取像素长度（最长的水平线段）
 4. 计算 scale_ratio = 物理长度(nm) / 像素长度
+
+V2.1 增强:
+- 新增 extract_scale_info 返回结构化结果
+- 保留原 extract_scale_ratio 函数名兼容旧调用
 """
 
 import cv2
 import numpy as np
 import re
-from typing import Tuple
+from typing import Tuple, Dict, Any, Union
 
 
 class ScaleExtractionError(Exception):
     """比例尺提取失败的自定义异常"""
     pass
+
+
+def extract_scale_info(image_input: Union[np.ndarray, bytes]) -> Dict[str, Any]:
+    """
+    提取比例尺的完整结构化信息（V2.1 新接口）
+
+    Args:
+        image_input: BGR 图像矩阵 或 图像字节
+
+    Returns:
+        {
+            "scale_ratio": float,             # nm/px
+            "physical_length_nm": float,      # 物理长度 (nm)
+            "pixel_length": float,            # 像素长度
+            "ocr_text": str,                  # OCR 原始文本
+            "confidence": str,                # high / medium / low
+            "source": "ocr"
+        }
+
+    Raises:
+        ScaleExtractionError: 提取失败
+    """
+    # 兼容 bytes 输入
+    if isinstance(image_input, (bytes, bytearray)):
+        nparr = np.frombuffer(image_input, np.uint8)
+        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if image is None:
+            raise ScaleExtractionError("无法解码图像数据")
+    else:
+        image = image_input
+
+    if image is None or image.size == 0:
+        raise ScaleExtractionError("无法裁剪图像底部区域")
+
+    bottom_region = _crop_bottom_region(image, ratio=0.15)
+
+    # OCR 文本
+    physical_length_nm, ocr_text = _extract_physical_length_with_text(bottom_region)
+
+    # 像素长度
+    pixel_length = _extract_pixel_length(bottom_region)
+    if pixel_length <= 0:
+        raise ScaleExtractionError("未能检测到标尺线段")
+
+    scale_ratio = physical_length_nm / pixel_length
+    if scale_ratio <= 0 or scale_ratio > 1000:
+        raise ScaleExtractionError(f"计算出的比例尺异常: {scale_ratio:.4f} nm/px")
+
+    # 简单置信度估计
+    confidence = _estimate_confidence(ocr_text, pixel_length)
+    return {
+        "scale_ratio": round(float(scale_ratio), 6),
+        "physical_length_nm": round(float(physical_length_nm), 3),
+        "pixel_length": round(float(pixel_length), 2),
+        "ocr_text": ocr_text.strip(),
+        "confidence": confidence,
+        "source": "ocr"
+    }
+
+
+def _estimate_confidence(ocr_text: str, pixel_length: float) -> str:
+    """根据 OCR 文本和线段长度估算置信度"""
+    text = ocr_text or ""
+    if not text:
+        return "low"
+    if re.search(r"\d", text):
+        if pixel_length >= 50:
+            return "high"
+        if pixel_length >= 20:
+            return "medium"
+        return "low"
+    return "low"
 
 
 def extract_scale_ratio(image_matrix: np.ndarray) -> float:
@@ -96,6 +172,17 @@ def _extract_physical_length_by_ocr(bottom_region: np.ndarray) -> float:
     Raises:
         ScaleExtractionError: OCR识别失败
     """
+    value, _ = _extract_physical_length_with_text(bottom_region)
+    return value
+
+
+def _extract_physical_length_with_text(bottom_region: np.ndarray) -> Tuple[float, str]:
+    """
+    OCR 提取物理长度并返回原始文本
+
+    Returns:
+        (physical_length_nm, ocr_text)
+    """
     try:
         import pytesseract
     except ImportError:
@@ -118,11 +205,13 @@ def _extract_physical_length_by_ocr(bottom_region: np.ndarray) -> float:
     ]
 
     physical_nm = None
+    matched_text = ""
 
     for pattern in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             value = float(match.group(1))
+            matched_text = match.group(0)
             if 'um' in pattern.lower():
                 physical_nm = value * 1000  # 微米转纳米
             else:
@@ -134,7 +223,7 @@ def _extract_physical_length_by_ocr(bottom_region: np.ndarray) -> float:
             f"OCR未能识别有效标尺文本。识别内容: '{text.strip()}'"
         )
 
-    return physical_nm
+    return physical_nm, matched_text or text.strip()
 
 
 def _extract_pixel_length(bottom_region: np.ndarray) -> float:

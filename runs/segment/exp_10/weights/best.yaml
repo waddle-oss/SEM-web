@@ -1,0 +1,10 @@
+type: yolov8_seg
+name: best_sem_model
+display_name: My SEM Model 10
+model_path: best.onnx
+input_width: 640
+input_height: 640
+confidence_threshold: 0.5
+nms_threshold: 0.45
+classes:
+  - particle

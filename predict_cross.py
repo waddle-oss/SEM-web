@@ -77,7 +77,7 @@ def is_on_border(contour, img_width, img_height, tolerance=5) -> bool:
 
 
 def get_particle_center_radius(contour):
-    """获取颗粒的中心点和半径"""
+    """获取颗粒的中心点与平均径向距离（用于绘制直径十字线）"""
     M = cv2.moments(contour)
     if M["m00"] == 0:
         return None, None
@@ -90,26 +90,26 @@ def get_particle_center_radius(contour):
         px, py = point[0]
         dist = np.sqrt((px - cx)**2 + (py - cy)**2)
         distances.append(dist)
-    radius = np.mean(distances)
+    mean_r = np.mean(distances)
 
-    return (cx, cy), radius
+    return (cx, cy), mean_r
 
 
-def draw_cross_diameters(img, center, radius, line_length_ratio=0.8):
+def draw_cross_diameters(img, center, mean_r, line_length_ratio=0.8):
     """
     在颗粒中心画两条90度相交的直径
 
     Args:
         img: 图像
         center: 圆心坐标 (x, y)
-        radius: 颗粒半径
-        line_length_ratio: 直径长度占半径的比例（默认0.8，即直径长度为半径的80%）
+        mean_r: 颗粒平均径向距离
+        line_length_ratio: 线段半长占 mean_r 的比例（默认0.8）
     """
-    if center is None or radius is None:
+    if center is None or mean_r is None:
         return
 
     cx, cy = center
-    half_length = int(radius * line_length_ratio)
+    half_length = int(mean_r * line_length_ratio)
 
     color = (0, 255, 0)
     thickness = 2
