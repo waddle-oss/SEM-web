@@ -329,15 +329,54 @@
             min-height: 120px;
             max-height: 600px;
         }
+        .image-stage {
+            position: relative;
+            display: none;
+            max-width: 100%;
+            max-height: 600px;
+            line-height: 0;
+            transform-origin: center center;
+        }
+        .image-stage.visible { display: inline-block; }
         .image-viewport img {
             max-width: 100%;
             max-height: 600px;
+            width: auto;
+            height: auto;
             object-fit: contain;
-            display: none;
+            display: block;
             user-select: none;
             -webkit-user-drag: none;
         }
-        .image-viewport img.visible { display: block; }
+        .scale-overlay {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+        .scale-overlay.annotating {
+            pointer-events: auto;
+            cursor: crosshair;
+        }
+        .bar-annotate-banner {
+            display: none;
+            position: absolute;
+            top: 8px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 5;
+            padding: 6px 12px;
+            background: rgba(15, 23, 42, 0.92);
+            border: 1px solid var(--primary);
+            border-radius: var(--radius-sm);
+            color: var(--primary);
+            font-size: 12px;
+            white-space: nowrap;
+            pointer-events: none;
+        }
+        .bar-annotate-banner.visible { display: block; }
 
         .workspace-empty {
             display: flex;
@@ -825,11 +864,31 @@
         .ocr-result-row {
             display: flex;
             justify-content: space-between;
+            gap: 8px;
             font-size: 11px;
             margin-bottom: 2px;
         }
-        .ocr-result-label { color: var(--text-muted); }
-        .ocr-result-value { color: var(--text-main); font-weight: 600; }
+        .ocr-result-label { color: var(--text-muted); flex-shrink: 0; }
+        .ocr-result-value {
+            color: var(--text-main);
+            font-weight: 600;
+            text-align: right;
+            word-break: break-all;
+        }
+        .ocr-debug-box {
+            margin-top: 6px;
+            padding: 6px;
+            background: rgba(15, 23, 42, 0.55);
+            border: 1px dashed var(--border-main);
+            border-radius: var(--radius-sm);
+            font-size: 10px;
+            color: var(--text-secondary);
+            white-space: pre-wrap;
+            max-height: 140px;
+            overflow: auto;
+            display: none;
+        }
+        .ocr-debug-box.visible { display: block; }
         .ocr-confirm-btns {
             display: flex;
             gap: 4px;
@@ -1196,10 +1255,14 @@
             cursor:pointer;
             position:relative;
             transition:all 0.2s;
+            background:#0B1220;
+            display:flex;
+            align-items:center;
+            justify-content:center;
         }
         .thumb-item:hover { border-color:var(--primary); }
         .thumb-item.active { border-color:var(--primary); box-shadow:0 0 12px rgba(56,189,248,0.3); }
-        .thumb-item img { width:100%; height:100%; object-fit:cover; }
+        .thumb-item img { max-width:100%; max-height:100%; width:auto; height:auto; object-fit:contain; }
         .thumb-item .thumb-index {
             position:absolute;
             top:2px;
@@ -1344,7 +1407,11 @@
                                 <div class="tip-card"><span class="tip-card-num">&#9314;</span><div><div class="tip-card-title">智能分析</div><div class="tip-card-desc">统计+标注+明细</div></div></div>
                             </div>
                         </div>
-                        <img id="displayImage" alt="SEM图像">
+                        <div class="image-stage" id="imageStage">
+                            <img id="displayImage" alt="SEM图像">
+                            <canvas id="scaleOverlay" class="scale-overlay"></canvas>
+                            <div class="bar-annotate-banner" id="barAnnotateBanner">请点击标尺线左端，再点击右端</div>
+                        </div>
                         <input type="file" id="fileInput" accept=".png,.jpg,.jpeg,.tif,.tiff,.bmp">
                     </div>
 
@@ -1484,10 +1551,18 @@
                             <div class="form-row" style="margin-top:2px;">
                                 <button class="btn-secondary" style="width:100%;font-size:11px;padding:4px;" id="btnOcr" onclick="runOcr()">&#128269; 识别比例尺</button>
                             </div>
+                            <div class="form-row" style="margin-top:4px;align-items:center;">
+                                <label class="form-label" style="margin:0;">Debug</label>
+                                <input type="checkbox" id="ocrDebugToggle" onchange="onOcrDebugToggle()" style="margin-left:auto;">
+                            </div>
                             <div class="ocr-result" id="ocrResult">
-                                <div class="ocr-result-row"><span class="ocr-result-label">识别值</span><span class="ocr-result-value" id="ocrValue">-</span></div>
+                                <div class="ocr-result-row"><span class="ocr-result-label">OCR文字</span><span class="ocr-result-value" id="ocrText">-</span></div>
+                                <div class="ocr-result-row"><span class="ocr-result-label">物理长度</span><span class="ocr-result-value" id="ocrPhysical">-</span></div>
+                                <div class="ocr-result-row"><span class="ocr-result-label">标尺线</span><span class="ocr-result-value" id="ocrPixelLength">-</span></div>
+                                <div class="ocr-result-row"><span class="ocr-result-label">计算值</span><span class="ocr-result-value" id="ocrValue">-</span></div>
                                 <div class="ocr-result-row"><span class="ocr-result-label">置信度</span><span class="ocr-result-value" id="ocrConfidence">-</span></div>
                                 <div class="ocr-result-row"><span class="ocr-result-label">状态</span><span class="ocr-result-value" id="ocrState">-</span></div>
+                                <div class="ocr-debug-box" id="ocrDebugBox"></div>
                                 <div class="ocr-confirm-btns">
                                     <button class="btn-ocr-ok" onclick="confirmOcrScale()">&#10003; 确认</button>
                                     <button class="btn-ocr-edit" onclick="editOcrScale()">&#9998; 编辑确认</button>
@@ -1616,6 +1691,43 @@
     <!-- 参数说明悬浮层（置于最前，避免被左侧面板遮挡） -->
     <div id="paramTipBubble" role="tooltip"></div>
 
+    <!-- 标尺线标注提示弹窗 -->
+    <div class="modal-overlay" id="barAnnotateModal" onclick="if(event.target===this)cancelBarAnnotation()">
+        <div class="modal-box">
+            <div class="modal-title">标注比例尺线</div>
+            <p style="font-size:13px;color:var(--text-secondary);line-height:1.6;margin:0 0 16px;">
+                请在图片中手动标注比例尺线：<br>
+                从标尺线<strong>左端</strong>点击一次，再从<strong>右端</strong>点击一次。
+            </p>
+            <div class="modal-actions">
+                <button class="modal-cancel" onclick="cancelBarAnnotation()">取消</button>
+                <button class="modal-confirm" onclick="startBarAnnotation()">开始标注</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- OCR失败时手动输入物理长度 -->
+    <div class="modal-overlay" id="physicalLengthModal" onclick="if(event.target===this)closePhysicalLengthModal()">
+        <div class="modal-box">
+            <div class="modal-title">手动输入物理长度</div>
+            <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px;" id="physicalLengthHint">
+                OCR未能识别标尺文字，请根据图像上的标尺标注输入物理长度。
+            </p>
+            <div class="form-row" style="margin-bottom:12px;">
+                <label class="form-label">物理长度</label>
+                <input type="number" class="form-input" id="physicalLengthInput" placeholder="例如 100" step="any" min="0">
+                <select class="form-select" id="physicalLengthUnit" style="max-width:70px;flex:0;">
+                    <option value="nm">nm</option>
+                    <option value="um">μm</option>
+                </select>
+            </div>
+            <div class="modal-actions">
+                <button class="modal-cancel" onclick="closePhysicalLengthModal()">取消</button>
+                <button class="modal-confirm" onclick="submitPhysicalLengthAndOcr()">计算比例尺</button>
+            </div>
+        </div>
+    </div>
+
     <!-- 导出弹窗 -->
     <div class="modal-overlay" id="exportModal">
         <div class="modal-box">
@@ -1675,7 +1787,7 @@
                             <li><span class="help-step-num">1</span><div class="help-step-body"><div class="help-step-title">登录系统</div>使用账号登录后进入主工作台。</div></li>
                             <li><span class="help-step-num">2</span><div class="help-step-body"><div class="help-step-title">加载模型</div>右侧「模型设置」默认选中 exp_10，也可切换其他实验模型后点击加载。</div></li>
                             <li><span class="help-step-num">3</span><div class="help-step-body"><div class="help-step-title">上传图像</div>支持单张上传或批量加载 PNG / JPG / TIF / BMP。</div></li>
-                            <li><span class="help-step-num">4</span><div class="help-step-body"><div class="help-step-title">确认比例尺</div>手动输入 nm/px，或使用 OCR 识别后确认。</div></li>
+                            <li><span class="help-step-num">4</span><div class="help-step-body"><div class="help-step-title">确认比例尺</div>手动输入 nm/px，或 OCR 识别标尺文字+线段后确认。</div></li>
                             <li><span class="help-step-num">5</span><div class="help-step-body"><div class="help-step-title">设置过滤参数</div>调整完整度、面积与边缘规则，点击「确认参数」。</div></li>
                             <li><span class="help-step-num">6</span><div class="help-step-body"><div class="help-step-title">开始分析</div>单张直接分析；多张时进入批量分析，可暂停。</div></li>
                             <li><span class="help-step-num">7</span><div class="help-step-body"><div class="help-step-title">查看与导出</div>查看指标、直径分布、明细表，并导出 CSV / Excel / 标注图。</div></li>
@@ -1740,7 +1852,7 @@
                         <h4>比例尺设置</h4>
                         <ul>
                             <li><strong>手动模式</strong>：输入每像素对应的物理长度，单位可选 nm/px 或 μm/px，然后点「确认比例尺」。</li>
-                            <li><strong>OCR 模式</strong>：上传含标尺文字的图像后点击识别，核对结果后再「确认」或「编辑确认」。</li>
+                            <li><strong>OCR 模式</strong>：先在图上点击标尺线左端与右端得到像素长度，再 OCR 识别「100 nm」等文字，计算 nm/px；识别失败时可手动输入物理长度。核对后点「确认」。</li>
                             <li>比例尺未确认时无法开始分析。</li>
                             <li>分析结果中的直径单位为 nm，依赖于正确的比例尺换算。</li>
                         </ul>
@@ -1849,9 +1961,15 @@
             scaleRatio: null,
             scaleUnit: 'nm/px',
             ocrResult: null,
+            ocrInfo: null,
             ocrConfidence: null,
             ocrStatus: OCR_STATUS.IDLE,
+            ocrDebug: false,
             scaleConfirmed: false,
+            // OCR 模式：用户两点标注标尺线
+            barAnnotating: false,
+            barPoints: [],          // [{x,y} in natural image coords]
+            barPixelLength: null,
 
             filterParams: {
                 completenessThreshold: 0.8,
@@ -2089,12 +2207,15 @@
             appState.analysisStatus = ANALYSIS_STATUS.IDLE;
 
             document.getElementById('displayImage').src = '';
-            document.getElementById('displayImage').classList.remove('visible');
+            const stage = document.getElementById('imageStage');
+            if (stage) stage.classList.remove('visible');
+            clearScaleOverlay();
             document.getElementById('workspaceEmpty').classList.remove('hidden');
             document.getElementById('workspaceToolbar').style.display = 'none';
             document.getElementById('imageInfoBar').classList.remove('visible');
             document.getElementById('ocrResult').classList.remove('visible');
             document.getElementById('scaleInput').value = '';
+            appState.ocrInfo = null;
 
             clearMetricCards();
             clearCharts();
@@ -2413,10 +2534,13 @@
                         document.getElementById('infoFileName').textContent = file.name;
                         document.getElementById('infoDimensions').textContent = `${img.naturalWidth} × ${img.naturalHeight}`;
 
-                        img.classList.add('visible');
+                        const stage = document.getElementById('imageStage');
+                        if (stage) stage.classList.add('visible');
                         document.getElementById('workspaceEmpty').classList.add('hidden');
                         document.getElementById('workspaceToolbar').style.display = 'flex';
                         document.getElementById('imageInfoBar').classList.add('visible');
+                        // 切换图片后若有 OCR 结果则重绘叠加层
+                        requestAnimationFrame(() => drawScaleOverlay(appState.ocrInfo));
 
                         if (resetAnalysis) {
                             resetCurrentAnalysisUI();
@@ -2466,12 +2590,23 @@
             appState.scaleRatio = null;
             appState.scaleConfirmed = false;
             appState.ocrResult = null;
+            appState.ocrInfo = null;
+            appState.barAnnotating = false;
+            appState.barPoints = [];
+            appState.barPixelLength = null;
             appState.analysisResult = null;
             appState.annotatedImageUrl = null;
             appState.analysisStatus = ANALYSIS_STATUS.IDLE;
 
             const ocrResult = document.getElementById('ocrResult');
             if (ocrResult) ocrResult.classList.remove('visible');
+            stopBarAnnotationUI();
+            clearScaleOverlay();
+            const debugBox = document.getElementById('ocrDebugBox');
+            if (debugBox) {
+                debugBox.textContent = '';
+                debugBox.classList.remove('visible');
+            }
             const scaleInput = document.getElementById('scaleInput');
             if (scaleInput) scaleInput.value = '';
             document.getElementById('infoDuration').textContent = '-';
@@ -2663,9 +2798,11 @@
                 // 图片元素
                 const img = document.createElement('img');
                 img.alt = file.name;
-                img.style.width = '100%';
-                img.style.height = '100%';
-                img.style.objectFit = 'cover';
+                img.style.maxWidth = '100%';
+                img.style.maxHeight = '100%';
+                img.style.width = 'auto';
+                img.style.height = 'auto';
+                img.style.objectFit = 'contain';
                 
                 // 状态标签
                 const statusSpan = document.createElement('span');
@@ -2683,7 +2820,7 @@
                             const arrayBuffer = e.target.result;
                             const tiff = new Tiff({ buffer: arrayBuffer });
                             
-                            // 获取原始尺寸，计算缩略图尺寸（限制最大 80x80）
+                            // 获取原始尺寸，计算缩略图尺寸（限制最大 80x80，等比例）
                             const origWidth = tiff.width();
                             const origHeight = tiff.height();
                             let thumbWidth = 80;
@@ -2710,17 +2847,21 @@
                             const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
                             img.src = dataUrl;
                             img.style.display = 'block';
-                            img.style.width = '100%';
-                            img.style.height = '100%';
-                            img.style.objectFit = 'cover';
+                            img.style.maxWidth = '100%';
+                            img.style.maxHeight = '100%';
+                            img.style.width = 'auto';
+                            img.style.height = 'auto';
+                            img.style.objectFit = 'contain';
                         } catch(err) {
                             console.warn('TIF缩略图生成失败:', err);
                             // 失败时显示占位图
                             img.src = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' fill='%23111827'/%3E%3Ctext x='50' y='52' text-anchor='middle' font-size='24' fill='%23EF4444'%3E✕%3C/text%3E%3Ctext x='50' y='76' text-anchor='middle' font-size='10' fill='%236B7280'%3ETIF%3C/text%3E%3C/svg%3E";
                             img.style.display = 'block';
-                            img.style.width = '100%';
-                            img.style.height = '100%';
-                            img.style.objectFit = 'cover';
+                            img.style.maxWidth = '100%';
+                            img.style.maxHeight = '100%';
+                            img.style.width = 'auto';
+                            img.style.height = 'auto';
+                            img.style.objectFit = 'contain';
                         }
                     };
                     reader.readAsArrayBuffer(file);
@@ -2729,9 +2870,11 @@
                     const url = URL.createObjectURL(file);
                     img.src = url;
                     img.style.display = 'block';
-                    img.style.width = '100%';
-                    img.style.height = '100%';
-                    img.style.objectFit = 'cover';
+                    img.style.maxWidth = '100%';
+                    img.style.maxHeight = '100%';
+                    img.style.width = 'auto';
+                    img.style.height = 'auto';
+                    img.style.objectFit = 'contain';
                 }
                 
                 thumbDiv.appendChild(img);
@@ -3090,57 +3233,426 @@
                 ocrSection.style.display = 'block';
             } else {
                 ocrSection.style.display = 'none';
+                cancelBarAnnotation();
             }
             updateAnalyzeButton();
         }
 
-        async function runOcr() {
+        function runOcr() {
             if (!appState.imageFile) {
                 showToast('请先上传图像', 'warning');
                 return;
             }
+            // 不立即检线/OCR：先弹窗引导手动标注标尺线
+            document.getElementById('barAnnotateModal').classList.add('visible');
+        }
+
+        function startBarAnnotation() {
+            document.getElementById('barAnnotateModal').classList.remove('visible');
+            appState.barAnnotating = true;
+            appState.barPoints = [];
+            appState.barPixelLength = null;
+            appState.ocrStatus = OCR_STATUS.RUNNING;
+            clearScaleOverlay();
+
+            const canvas = document.getElementById('scaleOverlay');
+            const banner = document.getElementById('barAnnotateBanner');
+            if (canvas) {
+                canvas.classList.add('annotating');
+                // 同步画布尺寸
+                const img = document.getElementById('displayImage');
+                if (img && img.clientWidth) {
+                    canvas.width = img.clientWidth;
+                    canvas.height = img.clientHeight;
+                }
+                canvas.onclick = onBarAnnotateClick;
+            }
+            if (banner) {
+                banner.textContent = '请点击标尺线左端';
+                banner.classList.add('visible');
+            }
+            document.getElementById('scaleTip').textContent = '标注中：先点左端，再点右端';
+            document.getElementById('btnOcr').disabled = true;
+            updateTopStatus();
+            showToast('请在图像上点击标尺线左端', 'info');
+        }
+
+        function cancelBarAnnotation() {
+            document.getElementById('barAnnotateModal').classList.remove('visible');
+            stopBarAnnotationUI();
+            if (appState.ocrStatus === OCR_STATUS.RUNNING && !appState.ocrResult) {
+                appState.ocrStatus = OCR_STATUS.IDLE;
+            }
+            updateTopStatus();
+        }
+
+        function stopBarAnnotationUI() {
+            appState.barAnnotating = false;
+            const canvas = document.getElementById('scaleOverlay');
+            const banner = document.getElementById('barAnnotateBanner');
+            if (canvas) {
+                canvas.classList.remove('annotating');
+                canvas.onclick = null;
+            }
+            if (banner) banner.classList.remove('visible');
+            const btn = document.getElementById('btnOcr');
+            if (btn) {
+                btn.disabled = false;
+                btn.textContent = '🔍 识别比例尺';
+            }
+        }
+
+        function onBarAnnotateClick(e) {
+            if (!appState.barAnnotating) return;
+            const img = document.getElementById('displayImage');
+            if (!img || !img.naturalWidth) return;
+
+            const rect = img.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0) return;
+
+            const nx = (e.clientX - rect.left) / rect.width * img.naturalWidth;
+            const ny = (e.clientY - rect.top) / rect.height * img.naturalHeight;
+            if (nx < 0 || ny < 0 || nx > img.naturalWidth || ny > img.naturalHeight) return;
+
+            appState.barPoints.push({ x: nx, y: ny });
+            drawBarAnnotationOverlay();
+
+            const banner = document.getElementById('barAnnotateBanner');
+            if (appState.barPoints.length === 1) {
+                if (banner) banner.textContent = '请再点击标尺线右端';
+                showToast('已记录左端，请点击右端', 'info');
+                return;
+            }
+
+            // 两点完成
+            const p1 = appState.barPoints[0];
+            const p2 = appState.barPoints[1];
+            const pixelLength = Math.sqrt((p2.x - p1.x) ** 2 + (p2.y - p1.y) ** 2);
+            if (pixelLength < 1) {
+                showToast('两点距离过短，请重新标注', 'warning');
+                appState.barPoints = [];
+                if (banner) banner.textContent = '请点击标尺线左端';
+                clearScaleOverlay();
+                return;
+            }
+
+            appState.barPixelLength = pixelLength;
+            stopBarAnnotationUI();
+            if (banner) banner.classList.remove('visible');
+            document.getElementById('scaleTip').textContent =
+                `标尺线已标注: ${pixelLength.toFixed(1)} px，正在 OCR 识别文字...`;
+            runOcrWithBarLength(pixelLength, p1, p2);
+        }
+
+        function drawBarAnnotationOverlay() {
+            const canvas = document.getElementById('scaleOverlay');
+            const img = document.getElementById('displayImage');
+            if (!canvas || !img || !img.naturalWidth) return;
+
+            const dispW = img.clientWidth;
+            const dispH = img.clientHeight;
+            if (!dispW || !dispH) return;
+            canvas.width = dispW;
+            canvas.height = dispH;
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, dispW, dispH);
+
+            const sx = dispW / img.naturalWidth;
+            const sy = dispH / img.naturalHeight;
+            const pts = appState.barPoints || [];
+
+            pts.forEach((p, i) => {
+                ctx.fillStyle = i === 0 ? '#38BDF8' : '#F59E0B';
+                ctx.beginPath();
+                ctx.arc(p.x * sx, p.y * sy, 5, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = '#fff';
+                ctx.font = '11px sans-serif';
+                ctx.fillText(i === 0 ? 'L' : 'R', p.x * sx + 7, p.y * sy - 7);
+            });
+
+            if (pts.length === 2) {
+                ctx.strokeStyle = '#F59E0B';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(pts[0].x * sx, pts[0].y * sy);
+                ctx.lineTo(pts[1].x * sx, pts[1].y * sy);
+                ctx.stroke();
+                const len = Math.sqrt((pts[1].x - pts[0].x) ** 2 + (pts[1].y - pts[0].y) ** 2);
+                ctx.fillStyle = '#F59E0B';
+                ctx.fillText(
+                    `${len.toFixed(1)} px`,
+                    ((pts[0].x + pts[1].x) / 2) * sx,
+                    ((pts[0].y + pts[1].y) / 2) * sy - 8
+                );
+            }
+        }
+
+        async function runOcrWithBarLength(pixelLength, p1, p2, physicalLengthNm = null) {
             const btn = document.getElementById('btnOcr');
             btn.textContent = '识别中...';
             btn.disabled = true;
             appState.ocrStatus = OCR_STATUS.RUNNING;
+            appState.ocrDebug = !!document.getElementById('ocrDebugToggle')?.checked;
             updateTopStatus();
 
             try {
                 const formData = new FormData();
                 formData.append('file', appState.imageFile);
+                formData.append('debug', appState.ocrDebug ? 'true' : 'false');
+                formData.append('pixel_length', String(pixelLength));
+                formData.append('bar_x1', String(p1.x));
+                formData.append('bar_y1', String(p1.y));
+                formData.append('bar_x2', String(p2.x));
+                formData.append('bar_y2', String(p2.y));
+                if (physicalLengthNm != null && physicalLengthNm > 0) {
+                    formData.append('physical_length_nm', String(physicalLengthNm));
+                }
 
                 let resp = await fetch('/api/scale/extract', { method: 'POST', body: formData });
                 let data = await resp.json();
                 if (!data || !data.success) {
+                    if (appState.ocrDebug && data && data.data && data.data.debug) {
+                        renderOcrDebug(data.data.debug, data.detail || data.message);
+                    }
+                    // 需要手动物理长度
+                    if (data && data.data && data.data.need_physical_length && physicalLengthNm == null) {
+                        appState.ocrStatus = OCR_STATUS.FAILED;
+                        openPhysicalLengthModal(data.message || data.detail);
+                        return;
+                    }
+                    // 回退旧路径（同样带 pixel_length）
                     resp = await fetch('/api/extract_scale', { method: 'POST', body: formData });
                     data = await resp.json();
-                    if (data && data.success && data.scale_ratio && !data.data) {
-                        data = { success: true, data: { scale_ratio: data.scale_ratio } };
-                    }
                 }
 
                 if (data && data.success && data.data) {
-                    const info = data.data;
-                    appState.ocrResult = info.scale_ratio;
-                    appState.ocrConfidence = info.confidence || 'medium';
-                    appState.ocrStatus = OCR_STATUS.WAITING_CONFIRM;
-                    document.getElementById('ocrValue').textContent = `${info.scale_ratio.toFixed(4)} nm/px`;
-                    document.getElementById('ocrConfidence').textContent = info.confidence || 'medium';
-                    document.getElementById('ocrState').textContent = '待确认';
-                    document.getElementById('ocrResult').classList.add('visible');
-                    showToast('OCR 识别成功，请确认比例尺', 'success');
+                    applyOcrInfo(data.data);
+                    showToast('比例尺识别成功，请人工确认', 'success');
+                } else if (data && data.data && data.data.need_physical_length && physicalLengthNm == null) {
+                    appState.ocrStatus = OCR_STATUS.FAILED;
+                    openPhysicalLengthModal(data.message || data.detail);
                 } else {
                     appState.ocrStatus = OCR_STATUS.FAILED;
-                    showToast((data && (data.message || data.code)) || 'OCR 识别失败，请手动输入', 'error');
-                    document.getElementById('ocrResult').classList.remove('visible');
+                    if (appState.ocrDebug && data && data.data && data.data.debug) {
+                        renderOcrDebug(data.data.debug, data.detail || data.message);
+                        document.getElementById('ocrResult').classList.add('visible');
+                        document.getElementById('ocrState').textContent = '失败';
+                    }
+                    showToast((data && (data.message || data.code)) || 'OCR 识别失败，请手动输入物理长度', 'error');
+                    openPhysicalLengthModal(data && data.message);
                 }
             } catch (e) {
                 appState.ocrStatus = OCR_STATUS.FAILED;
                 showToast('OCR 服务调用失败', 'error');
             } finally {
-                btn.textContent = '识别比例尺';
+                btn.textContent = '🔍 识别比例尺';
                 btn.disabled = false;
                 updateTopStatus();
+            }
+        }
+
+        function openPhysicalLengthModal(hint) {
+            const modal = document.getElementById('physicalLengthModal');
+            const hintEl = document.getElementById('physicalLengthHint');
+            if (hintEl) {
+                hintEl.textContent = hint ||
+                    'OCR未能识别标尺文字，请根据图像上的标尺标注输入物理长度（如 100 nm）。';
+            }
+            const input = document.getElementById('physicalLengthInput');
+            if (input) input.value = '';
+            modal.classList.add('visible');
+        }
+
+        function closePhysicalLengthModal() {
+            document.getElementById('physicalLengthModal').classList.remove('visible');
+        }
+
+        function submitPhysicalLengthAndOcr() {
+            const val = parseFloat(document.getElementById('physicalLengthInput').value);
+            const unit = document.getElementById('physicalLengthUnit').value;
+            if (!val || val <= 0) {
+                showToast('请输入有效的物理长度', 'warning');
+                return;
+            }
+            if (!appState.barPixelLength || appState.barPoints.length < 2) {
+                showToast('请先标注标尺线', 'warning');
+                closePhysicalLengthModal();
+                return;
+            }
+            const physicalNm = unit === 'um' ? val * 1000 : val;
+            closePhysicalLengthModal();
+            const p1 = appState.barPoints[0];
+            const p2 = appState.barPoints[1];
+            runOcrWithBarLength(appState.barPixelLength, p1, p2, physicalNm);
+        }
+
+        function onOcrDebugToggle() {
+            appState.ocrDebug = !!document.getElementById('ocrDebugToggle')?.checked;
+            const box = document.getElementById('ocrDebugBox');
+            if (!box) return;
+            if (appState.ocrDebug && appState.ocrInfo?.debug) {
+                renderOcrDebug(appState.ocrInfo.debug);
+            } else if (!appState.ocrDebug) {
+                box.classList.remove('visible');
+            }
+        }
+
+        function applyOcrInfo(info) {
+            appState.ocrInfo = info;
+            appState.ocrResult = info.scale_ratio;
+            appState.ocrConfidence = info.confidence || 'medium';
+            appState.ocrStatus = OCR_STATUS.WAITING_CONFIRM;
+            appState.scaleConfirmed = false;
+
+            const physical = info.physical_length_nm != null
+                ? `${Number(info.physical_length_nm).toFixed(1)} nm`
+                : '-';
+            const pixelLen = info.pixel_length != null
+                ? `${Number(info.pixel_length).toFixed(1)} px`
+                : '-';
+            const calc = (info.physical_length_nm != null && info.pixel_length)
+                ? `${Number(info.physical_length_nm).toFixed(1)} / ${Number(info.pixel_length).toFixed(1)} = ${Number(info.scale_ratio).toFixed(6)}`
+                : `${Number(info.scale_ratio).toFixed(6)} nm/px`;
+
+            document.getElementById('ocrText').textContent = info.ocr_text || info.ocr_raw_text || '-';
+            document.getElementById('ocrPhysical').textContent = physical;
+            document.getElementById('ocrPixelLength').textContent = pixelLen;
+            document.getElementById('ocrValue').textContent = `${Number(info.scale_ratio).toFixed(6)} nm/px`;
+            document.getElementById('ocrConfidence').textContent = info.confidence || 'medium';
+            document.getElementById('ocrState').textContent = '待确认';
+            document.getElementById('ocrResult').classList.add('visible');
+
+            document.getElementById('scaleInput').value = Number(info.scale_ratio).toFixed(6);
+            document.getElementById('scaleUnit').value = 'nm/px';
+            document.getElementById('infoScale').textContent =
+                `1 px = ${Number(info.scale_ratio).toFixed(4)} nm (待确认)`;
+            document.getElementById('scaleTip').textContent =
+                `OCR: ${info.ocr_text || '-'} / 标注 ${pixelLen} → ${Number(info.scale_ratio).toFixed(6)} nm/px，请确认`;
+
+            const badge = document.getElementById('scaleBadge');
+            badge.className = 'param-card-badge badge-warning';
+            badge.textContent = '待确认';
+
+            if (appState.ocrDebug && info.debug) {
+                renderOcrDebug(info.debug, calc);
+            } else {
+                const box = document.getElementById('ocrDebugBox');
+                if (box) box.classList.remove('visible');
+            }
+
+            drawScaleOverlay(info);
+            updateStepBar();
+            updateAnalyzeButton();
+        }
+
+        function renderOcrDebug(debugObj, extraLine) {
+            const box = document.getElementById('ocrDebugBox');
+            if (!box) return;
+            const lines = [];
+            if (extraLine) lines.push(String(extraLine));
+            if (debugObj) {
+                if (debugObj.mode) lines.push(`mode: ${debugObj.mode}`);
+                if (debugObj.selected_strategy) lines.push(`strategy: ${debugObj.selected_strategy}`);
+                if (debugObj.calculation) lines.push(`calc: ${debugObj.calculation}`);
+                if (debugObj.pixel_length_user != null) {
+                    lines.push(`user_bar_px: ${debugObj.pixel_length_user}`);
+                }
+                if (debugObj.image_size) {
+                    lines.push(`image: ${debugObj.image_size.width}×${debugObj.image_size.height}`);
+                }
+                const tried = debugObj.regions_tried || [];
+                tried.forEach((t, i) => {
+                    const r = t.region || {};
+                    lines.push(
+                        `#${i + 1} ${t.strategy || '-'} ` +
+                        `region=(${r.x},${r.y},${r.w},${r.h}) ` +
+                        `ocr="${(t.ocr_matched || t.ocr_raw_text || '').toString().slice(0, 40)}" ` +
+                        `${t.ok ? 'OK' : ('ERR:' + (t.error || ''))}`
+                    );
+                });
+            }
+            const info = appState.ocrInfo;
+            if (info) {
+                lines.push(`ocr_text: ${info.ocr_text || '-'}`);
+                lines.push(`ocr_raw: ${(info.ocr_raw_text || '').slice(0, 120)}`);
+                if (info.bar) {
+                    lines.push(`bar: (${info.bar.x1},${info.bar.y1})-(${info.bar.x2},${info.bar.y2}) length=${info.bar.length_px}px`);
+                }
+                lines.push(`nm/px: ${info.scale_ratio}`);
+            }
+            box.textContent = lines.join('\n');
+            box.classList.add('visible');
+        }
+
+        function clearScaleOverlay() {
+            const canvas = document.getElementById('scaleOverlay');
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
+
+        function drawScaleOverlay(info) {
+            const canvas = document.getElementById('scaleOverlay');
+            const img = document.getElementById('displayImage');
+            if (!canvas || !img || !info || !img.naturalWidth) {
+                clearScaleOverlay();
+                return;
+            }
+
+            const dispW = img.clientWidth;
+            const dispH = img.clientHeight;
+            if (!dispW || !dispH) return;
+
+            canvas.width = dispW;
+            canvas.height = dispH;
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, dispW, dispH);
+
+            const sx = dispW / img.naturalWidth;
+            const sy = dispH / img.naturalHeight;
+
+            if (info.region) {
+                ctx.strokeStyle = 'rgba(56, 189, 248, 0.7)';
+                ctx.lineWidth = 1.5;
+                ctx.setLineDash([4, 3]);
+                ctx.strokeRect(
+                    info.region.x * sx,
+                    info.region.y * sy,
+                    info.region.w * sx,
+                    info.region.h * sy
+                );
+                ctx.setLineDash([]);
+            }
+
+            if (info.bar && info.bar.source === 'user_annotation') {
+                ctx.strokeStyle = '#F59E0B';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(info.bar.x1 * sx, info.bar.y1 * sy);
+                ctx.lineTo(info.bar.x2 * sx, info.bar.y2 * sy);
+                ctx.stroke();
+                // 端点
+                [[info.bar.x1, info.bar.y1], [info.bar.x2, info.bar.y2]].forEach(([x, y], i) => {
+                    ctx.fillStyle = i === 0 ? '#38BDF8' : '#F59E0B';
+                    ctx.beginPath();
+                    ctx.arc(x * sx, y * sy, 4, 0, Math.PI * 2);
+                    ctx.fill();
+                });
+                ctx.fillStyle = '#F59E0B';
+                ctx.font = '11px sans-serif';
+                ctx.fillText(
+                    `${Number(info.bar.length_px).toFixed(1)} px`,
+                    info.bar.x1 * sx,
+                    info.bar.y1 * sy - 6
+                );
+            } else if (info.bar) {
+                ctx.strokeStyle = '#F59E0B';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(info.bar.x1 * sx, info.bar.y1 * sy);
+                ctx.lineTo(info.bar.x2 * sx, info.bar.y2 * sy);
+                ctx.stroke();
             }
         }
 
@@ -3150,16 +3662,22 @@
             appState.scaleConfirmed = true;
             appState.scaleUnit = 'nm/px';
             appState.ocrStatus = OCR_STATUS.CONFIRMED;
-            document.getElementById('scaleInput').value = appState.scaleRatio.toFixed(4);
+            document.getElementById('scaleInput').value = Number(appState.scaleRatio).toFixed(6);
             document.getElementById('scaleUnit').value = 'nm/px';
             document.getElementById('ocrState').textContent = '已确认';
-            document.getElementById('infoScale').textContent = `1 px = ${appState.scaleRatio.toFixed(4)} nm`;
+            document.getElementById('infoScale').textContent = `1 px = ${Number(appState.scaleRatio).toFixed(4)} nm`;
 
             const badge = document.getElementById('scaleBadge');
             badge.className = 'param-card-badge badge-success';
             badge.textContent = '已确认';
 
-            document.getElementById('scaleTip').textContent = '比例尺已确认，可开始分析';
+            const tipBits = [];
+            if (appState.ocrInfo?.ocr_text) tipBits.push(appState.ocrInfo.ocr_text);
+            if (appState.ocrInfo?.pixel_length) tipBits.push(`${appState.ocrInfo.pixel_length} px`);
+            document.getElementById('scaleTip').textContent =
+                tipBits.length
+                    ? `已采用 OCR 比例尺: ${tipBits.join(' / ')} → ${Number(appState.scaleRatio).toFixed(6)} nm/px`
+                    : '比例尺已确认，可开始分析';
             updateTopStatus();
             updateStepBar();
             updateAnalyzeButton();
@@ -3181,6 +3699,8 @@
             const badge = document.getElementById('scaleBadge');
             badge.className = 'param-card-badge badge-success';
             badge.textContent = '已确认';
+            document.getElementById('scaleTip').textContent =
+                `已采用手动确认比例尺: ${val.toFixed(6)} nm/px`;
             updateTopStatus();
             updateStepBar();
             updateAnalyzeButton();
@@ -3207,7 +3727,9 @@
             badge.className = 'param-card-badge badge-success';
             badge.textContent = '已确认';
             
-            document.getElementById('scaleTip').textContent = '比例尺已确认，可开始分析';
+            document.getElementById('scaleTip').textContent = `已采用手动比例尺: ${nmPerPx.toFixed(6)} nm/px`;
+            clearScaleOverlay();
+            appState.ocrInfo = null;
             updateAnalyzeButton();
             updateStepBar();
             showToast(`比例尺已确认: ${nmPerPx.toFixed(4)} nm/px`, 'success');
@@ -3346,20 +3868,26 @@
 
         function fitToWindow() {
             appState.zoom = 1.0;
-            document.getElementById('displayImage').style.transform = 'scale(1)';
+            const stage = document.getElementById('imageStage');
+            if (stage) stage.style.transform = 'scale(1)';
             document.getElementById('zoomLevel').textContent = '100%';
+            requestAnimationFrame(() => drawScaleOverlay(appState.ocrInfo));
         }
 
         function zoomIn() {
             appState.zoom = Math.min(3, appState.zoom + 0.1);
-            document.getElementById('displayImage').style.transform = `scale(${appState.zoom})`;
+            const stage = document.getElementById('imageStage');
+            if (stage) stage.style.transform = `scale(${appState.zoom})`;
             document.getElementById('zoomLevel').textContent = `${Math.round(appState.zoom * 100)}%`;
+            requestAnimationFrame(() => drawScaleOverlay(appState.ocrInfo));
         }
 
         function zoomOut() {
             appState.zoom = Math.max(0.1, appState.zoom - 0.1);
-            document.getElementById('displayImage').style.transform = `scale(${appState.zoom})`;
+            const stage = document.getElementById('imageStage');
+            if (stage) stage.style.transform = `scale(${appState.zoom})`;
             document.getElementById('zoomLevel').textContent = `${Math.round(appState.zoom * 100)}%`;
+            requestAnimationFrame(() => drawScaleOverlay(appState.ocrInfo));
         }
 
         // 面板折叠

@@ -1,359 +1,685 @@
 """
-比例尺自动提取模块 (OCR Integration)
-从SEM图像底部状态栏自动识别标尺信息
+比例尺自动提取模块
 
-功能:
-1. 裁剪图像底部15%区域（状态栏）
-2. OCR识别物理长度（如 "100 nm", "1 μm"）
-3. OpenCV二值化提取像素长度（最长的水平线段）
-4. 计算 scale_ratio = 物理长度(nm) / 像素长度
-
-V2.1 增强:
-- 新增 extract_scale_info 返回结构化结果
-- 保留原 extract_scale_ratio 函数名兼容旧调用
+设计原则：
+1. 禁止整图 OCR 直接读出 nm/px
+2. 先定位比例尺区域（优先底部），再 OCR 标尺文字（如 "100 nm"）
+3. 用图像处理测量标尺线像素长度
+4. nm/px = physical_length_nm / pixel_length
 """
+
+from __future__ import annotations
 
 import cv2
 import numpy as np
 import re
-from typing import Tuple, Dict, Any, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 
 class ScaleExtractionError(Exception):
     """比例尺提取失败的自定义异常"""
-    pass
+
+    def __init__(self, message: str, debug: Optional[Dict[str, Any]] = None):
+        super().__init__(message)
+        self.debug = debug
 
 
-def extract_scale_info(image_input: Union[np.ndarray, bytes]) -> Dict[str, Any]:
+# 常见 SEM 标尺文字：数字 + 单位（绝不把 OCR 结果当成 nm/px）
+_SCALE_PATTERNS = [
+    # 微米优先（避免把 "1 μm" 误当成 nm）
+    (re.compile(r"(\d+(?:\.\d+)?)\s*(?:μm|µm|um|micron)s?\b", re.IGNORECASE), 1000.0),
+    (re.compile(r"(\d+(?:\.\d+)?)\s*(?:nm|nanometers?)\b", re.IGNORECASE), 1.0),
+]
+
+
+# 自动标尺线检测：当前 OCR 模式改由用户两点标注提供像素长度，默认禁用自动检线。
+# 保留 _detect_scale_bar 等实现，便于日后开关恢复。
+USE_AUTO_BAR_DETECTION = False
+
+
+def extract_scale_info(
+    image_input: Union[np.ndarray, bytes],
+    debug: bool = False,
+    pixel_length: Optional[float] = None,
+    physical_length_nm: Optional[float] = None,
+    bar_points: Optional[Dict[str, float]] = None,
+) -> Dict[str, Any]:
     """
-    提取比例尺的完整结构化信息（V2.1 新接口）
+    提取比例尺结构化信息。
+
+    推荐路径（OCR 模式）：
+      前端先手动两点标注得到 pixel_length，再调用本函数只做 OCR 文字识别。
+      nm/px = physical_length_nm / pixel_length
 
     Args:
-        image_input: BGR 图像矩阵 或 图像字节
-
-    Returns:
-        {
-            "scale_ratio": float,             # nm/px
-            "physical_length_nm": float,      # 物理长度 (nm)
-            "pixel_length": float,            # 像素长度
-            "ocr_text": str,                  # OCR 原始文本
-            "confidence": str,                # high / medium / low
-            "source": "ocr"
-        }
-
-    Raises:
-        ScaleExtractionError: 提取失败
+        image_input: 图像
+        debug: 是否返回调试信息
+        pixel_length: 用户标注的标尺线像素长度（优先）
+        physical_length_nm: 可选，OCR 失败时由用户手动填入的物理长度(nm)
+        bar_points: 可选，用户标注端点 {"x1","y1","x2","y2"}
     """
-    # 兼容 bytes 输入
-    if isinstance(image_input, (bytes, bytearray)):
-        nparr = np.frombuffer(image_input, np.uint8)
-        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if image is None:
-            raise ScaleExtractionError("无法解码图像数据")
-    else:
-        image = image_input
+    image = _decode_image(image_input)
+    height, width = image.shape[:2]
 
-    if image is None or image.size == 0:
-        raise ScaleExtractionError("无法裁剪图像底部区域")
+    # ---- 新路径：用户提供标尺线像素长度，OCR 只负责文字 ----
+    if pixel_length is not None:
+        return _extract_with_manual_bar(
+            image,
+            pixel_length=float(pixel_length),
+            physical_length_nm=physical_length_nm,
+            bar_points=bar_points,
+            debug=debug,
+        )
 
-    bottom_region = _crop_bottom_region(image, ratio=0.15)
+    # ---- 旧路径：自动检线（默认禁用）----
+    if not USE_AUTO_BAR_DETECTION:
+        raise ScaleExtractionError(
+            "已禁用自动标尺线检测，请先在图像上标注标尺线两端，再识别文字"
+        )
 
-    # OCR 文本
-    physical_length_nm, ocr_text = _extract_physical_length_with_text(bottom_region)
+    return _extract_with_auto_bar(image, debug=debug)
 
-    # 像素长度
-    pixel_length = _extract_pixel_length(bottom_region)
+
+def _extract_with_manual_bar(
+    image: np.ndarray,
+    pixel_length: float,
+    physical_length_nm: Optional[float],
+    bar_points: Optional[Dict[str, float]],
+    debug: bool,
+) -> Dict[str, Any]:
+    """OCR 文字 + 用户标注的像素长度 → nm/px。"""
     if pixel_length <= 0:
-        raise ScaleExtractionError("未能检测到标尺线段")
+        raise ScaleExtractionError("标尺像素长度必须大于 0")
 
-    scale_ratio = physical_length_nm / pixel_length
-    if scale_ratio <= 0 or scale_ratio > 1000:
-        raise ScaleExtractionError(f"计算出的比例尺异常: {scale_ratio:.4f} nm/px")
-
-    # 简单置信度估计
-    confidence = _estimate_confidence(ocr_text, pixel_length)
-    return {
-        "scale_ratio": round(float(scale_ratio), 6),
-        "physical_length_nm": round(float(physical_length_nm), 3),
-        "pixel_length": round(float(pixel_length), 2),
-        "ocr_text": ocr_text.strip(),
-        "confidence": confidence,
-        "source": "ocr"
+    height, width = image.shape[:2]
+    debug_log: Dict[str, Any] = {
+        "image_size": {"width": width, "height": height},
+        "mode": "manual_bar + ocr_text",
+        "pixel_length_user": pixel_length,
+        "regions_tried": [],
+        "selected_strategy": None,
+        "calculation": None,
+        "note": "Bar length from user annotation; OCR only reads scale label text",
     }
 
+    matched_text = ""
+    ocr_raw = ""
+    physical_nm: Optional[float] = None
+    region_used: Optional[Dict[str, Any]] = None
+    last_error = "OCR未能识别有效标尺文字"
 
-def _estimate_confidence(ocr_text: str, pixel_length: float) -> str:
-    """根据 OCR 文本和线段长度估算置信度"""
-    text = ocr_text or ""
-    if not text:
-        return "low"
-    if re.search(r"\d", text):
-        if pixel_length >= 50:
-            return "high"
-        if pixel_length >= 20:
-            return "medium"
-        return "low"
-    return "low"
+    for region_spec in _iter_search_regions(height, width):
+        crop = image[
+            region_spec["y"] : region_spec["y"] + region_spec["h"],
+            region_spec["x"] : region_spec["x"] + region_spec["w"],
+        ]
+        if crop.size == 0:
+            continue
+
+        attempt: Dict[str, Any] = {
+            "strategy": region_spec["strategy"],
+            "region": {
+                "x": region_spec["x"],
+                "y": region_spec["y"],
+                "w": region_spec["w"],
+                "h": region_spec["h"],
+            },
+            "ocr_raw_text": "",
+            "ocr_matched": None,
+            "ok": False,
+            "error": None,
+        }
+        try:
+            phys, matched, raw = _ocr_scale_label(crop)
+            attempt["ocr_raw_text"] = raw
+            attempt["ocr_matched"] = matched
+            attempt["physical_length_nm"] = phys
+            attempt["ok"] = True
+            debug_log["regions_tried"].append(attempt)
+            debug_log["selected_strategy"] = region_spec["strategy"]
+            physical_nm = phys
+            matched_text = matched
+            ocr_raw = raw
+            region_used = attempt["region"]
+            region_used["strategy"] = region_spec["strategy"]
+            break
+        except ScaleExtractionError as e:
+            attempt["error"] = str(e)
+            attempt["ocr_raw_text"] = str(e)
+            debug_log["regions_tried"].append(attempt)
+            last_error = str(e)
+
+    # OCR 失败：允许调用方传入 physical_length_nm 兜底
+    if physical_nm is None:
+        if physical_length_nm is not None and float(physical_length_nm) > 0:
+            physical_nm = float(physical_length_nm)
+            matched_text = matched_text or f"{physical_nm:g} nm (manual)"
+            ocr_raw = ocr_raw or "(ocr failed; physical length from user)"
+            debug_log["selected_strategy"] = "user_physical_length"
+        else:
+            raise ScaleExtractionError(
+                f"{last_error}。请手动输入物理长度（nm）后重试",
+                debug=debug_log if debug else None,
+            )
+
+    scale_ratio = physical_nm / pixel_length
+    if scale_ratio <= 0 or scale_ratio > 1000:
+        raise ScaleExtractionError(f"计算出的比例尺异常: {scale_ratio:.6f} nm/px")
+
+    confidence = _estimate_confidence(matched_text, pixel_length, ocr_raw)
+    calculation = f"{physical_nm:g} / {pixel_length:.2f} = {scale_ratio:.6f}"
+    debug_log["calculation"] = calculation
+
+    bar = None
+    if bar_points and all(k in bar_points for k in ("x1", "y1", "x2", "y2")):
+        bar = {
+            "x1": int(bar_points["x1"]),
+            "y1": int(bar_points["y1"]),
+            "x2": int(bar_points["x2"]),
+            "y2": int(bar_points["y2"]),
+            "length_px": round(float(pixel_length), 2),
+            "source": "user_annotation",
+        }
+    else:
+        bar = {
+            "x1": 0,
+            "y1": 0,
+            "x2": int(round(pixel_length)),
+            "y2": 0,
+            "length_px": round(float(pixel_length), 2),
+            "source": "user_annotation",
+        }
+
+    result = {
+        "scale_ratio": round(float(scale_ratio), 6),
+        "physical_length_nm": round(float(physical_nm), 3),
+        "pixel_length": round(float(pixel_length), 2),
+        "ocr_text": matched_text,
+        "ocr_raw_text": (ocr_raw or "").strip(),
+        "confidence": confidence,
+        "source": "ocr",
+        "region": region_used,
+        "bar": bar,
+    }
+    if debug:
+        result["debug"] = debug_log
+    return result
+
+
+def _extract_with_auto_bar(image: np.ndarray, debug: bool = False) -> Dict[str, Any]:
+    """
+    【已禁用默认入口】旧版：区域 OCR + 自动检测标尺线。
+    代码保留，仅当 USE_AUTO_BAR_DETECTION=True 时由 extract_scale_info 调用。
+    """
+    height, width = image.shape[:2]
+
+    debug_log: Dict[str, Any] = {
+        "image_size": {"width": width, "height": height},
+        "regions_tried": [],
+        "selected_strategy": None,
+        "calculation": None,
+        "note": "OCR only reads scale labels; nm/px is computed as physical_nm / bar_px",
+        "mode": "auto_bar (legacy)",
+    }
+
+    last_error = "未能在比例尺区域中识别到有效标尺文字与线段"
+    best_partial: Optional[Dict[str, Any]] = None
+
+    for region_spec in _iter_search_regions(height, width):
+        crop = image[
+            region_spec["y"] : region_spec["y"] + region_spec["h"],
+            region_spec["x"] : region_spec["x"] + region_spec["w"],
+        ]
+        if crop.size == 0:
+            continue
+
+        attempt: Dict[str, Any] = {
+            "strategy": region_spec["strategy"],
+            "region": {
+                "x": region_spec["x"],
+                "y": region_spec["y"],
+                "w": region_spec["w"],
+                "h": region_spec["h"],
+            },
+            "ocr_raw_text": "",
+            "ocr_matched": None,
+            "physical_length_nm": None,
+            "bar": None,
+            "ok": False,
+            "error": None,
+        }
+
+        try:
+            physical_nm, matched_text, ocr_raw = _ocr_scale_label(crop)
+            attempt["ocr_raw_text"] = ocr_raw
+            attempt["ocr_matched"] = matched_text
+            attempt["physical_length_nm"] = physical_nm
+
+            # 自动检线（保留代码，默认入口已关闭）
+            bar_local = _detect_scale_bar(crop)
+            if bar_local is None:
+                raise ScaleExtractionError("该区域未检测到有效标尺横线")
+
+            bar_global = {
+                "x1": region_spec["x"] + bar_local["x1"],
+                "y1": region_spec["y"] + bar_local["y1"],
+                "x2": region_spec["x"] + bar_local["x2"],
+                "y2": region_spec["y"] + bar_local["y2"],
+                "length_px": bar_local["length_px"],
+            }
+            attempt["bar"] = bar_global
+
+            pixel_length = float(bar_local["length_px"])
+            if pixel_length < 10:
+                raise ScaleExtractionError(f"标尺线过短: {pixel_length:.1f} px")
+
+            scale_ratio = physical_nm / pixel_length
+            if scale_ratio <= 0 or scale_ratio > 1000:
+                raise ScaleExtractionError(f"计算出的比例尺异常: {scale_ratio:.6f} nm/px")
+
+            confidence = _estimate_confidence(matched_text, pixel_length, ocr_raw)
+            calculation = f"{physical_nm:g} / {pixel_length:.2f} = {scale_ratio:.6f}"
+
+            attempt["ok"] = True
+            attempt["scale_ratio"] = scale_ratio
+            attempt["confidence"] = confidence
+            attempt["calculation"] = calculation
+            debug_log["regions_tried"].append(attempt)
+            debug_log["selected_strategy"] = region_spec["strategy"]
+            debug_log["calculation"] = calculation
+
+            result = {
+                "scale_ratio": round(float(scale_ratio), 6),
+                "physical_length_nm": round(float(physical_nm), 3),
+                "pixel_length": round(float(pixel_length), 2),
+                "ocr_text": matched_text,
+                "ocr_raw_text": (ocr_raw or "").strip(),
+                "confidence": confidence,
+                "source": "ocr",
+                "region": {
+                    "x": int(region_spec["x"]),
+                    "y": int(region_spec["y"]),
+                    "w": int(region_spec["w"]),
+                    "h": int(region_spec["h"]),
+                    "strategy": region_spec["strategy"],
+                },
+                "bar": {
+                    "x1": int(bar_global["x1"]),
+                    "y1": int(bar_global["y1"]),
+                    "x2": int(bar_global["x2"]),
+                    "y2": int(bar_global["y2"]),
+                    "length_px": round(float(pixel_length), 2),
+                },
+            }
+            if debug:
+                result["debug"] = debug_log
+            return result
+
+        except ScaleExtractionError as e:
+            attempt["error"] = str(e)
+            debug_log["regions_tried"].append(attempt)
+            last_error = str(e)
+            if attempt.get("physical_length_nm") and (
+                best_partial is None
+                or (attempt.get("bar") and not best_partial.get("bar"))
+            ):
+                best_partial = attempt
+            continue
+
+    detail = last_error
+    if best_partial and best_partial.get("ocr_matched"):
+        detail = (
+            f"{last_error}；已识别到文字 '{best_partial['ocr_matched']}'，"
+            f"但未能可靠测量标尺线像素长度"
+        )
+    raise ScaleExtractionError(detail, debug=debug_log if debug else None)
 
 
 def extract_scale_ratio(image_matrix: np.ndarray) -> float:
-    """
-    从SEM图像中自动提取比例尺
-
-    流程:
-    1. 裁剪底部15%区域（状态栏）
-    2. OCR识别物理长度
-    3. 二值化提取像素长度
-    4. 计算并返回 scale_ratio
-
-    Args:
-        image_matrix: BGR格式的图像矩阵（OpenCV读取的格式）
-
-    Returns:
-        float: 1像素对应的纳米数 (nm/pixel)
-
-    Raises:
-        ScaleExtractionError: 当无法提取比例尺时抛出
-    """
-    height, width = image_matrix.shape[:2]
-
-    # Step 1: 裁剪底部15%区域
-    bottom_region = _crop_bottom_region(image_matrix, ratio=0.15)
-
-    if bottom_region is None or bottom_region.size == 0:
-        raise ScaleExtractionError("无法裁剪图像底部区域")
-
-    # Step 2: OCR识别物理长度
-    physical_length_nm = _extract_physical_length_by_ocr(bottom_region)
-
-    # Step 3: 提取像素长度
-    pixel_length = _extract_pixel_length(bottom_region)
-
-    if pixel_length <= 0:
-        raise ScaleExtractionError("未能检测到标尺线段")
-
-    # Step 4: 计算比例尺
-    scale_ratio = physical_length_nm / pixel_length
-
-    if scale_ratio <= 0 or scale_ratio > 1000:
-        raise ScaleExtractionError(f"计算出的比例尺异常: {scale_ratio:.4f} nm/px")
-
-    return scale_ratio
-
-
-def _crop_bottom_region(image: np.ndarray, ratio: float = 0.15) -> np.ndarray:
-    """
-    裁剪图像底部区域
-
-    Args:
-        image: 原始图像
-        ratio: 裁剪比例（默认底部15%）
-
-    Returns:
-        裁剪后的图像区域
-    """
-    height, width = image.shape[:2]
-    y_start = int(height * (1 - ratio))
-    y_end = height
-
-    return image[y_start:y_end, 0:width]
-
-
-def _extract_physical_length_by_ocr(bottom_region: np.ndarray) -> float:
-    """
-    使用OCR提取物理长度
-
-    Args:
-        bottom_region: 底部区域图像
-
-    Returns:
-        物理长度（纳米）
-
-    Raises:
-        ScaleExtractionError: OCR识别失败
-    """
-    value, _ = _extract_physical_length_with_text(bottom_region)
-    return value
-
-
-def _extract_physical_length_with_text(bottom_region: np.ndarray) -> Tuple[float, str]:
-    """
-    OCR 提取物理长度并返回原始文本
-
-    Returns:
-        (physical_length_nm, ocr_text)
-    """
-    try:
-        import pytesseract
-    except ImportError:
-        raise ScaleExtractionError("请安装pytesseract: pip install pytesseract")
-
-    # 增强对比度（转为灰度+直方图均衡化）
-    gray = cv2.cvtColor(bottom_region, cv2.COLOR_BGR2GRAY)
-
-    # OCR识别
-    text = pytesseract.image_to_string(
-        gray,
-        config='--psm 6 --oem 3'  # PSM 6: 假设统一文本块
-    )
-
-    # 正则匹配数字+单位
-    # 支持格式: "100 nm", "1 μm", "1um", "500nm", "0.5um" 等
-    patterns = [
-        r'(\d+(?:\.\d+)?)\s*(?:um|μm|micron)',  # 微米
-        r'(\d+(?:\.\d+)?)\s*(?:nm|nanometer)',  # 纳米
-    ]
-
-    physical_nm = None
-    matched_text = ""
-
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            value = float(match.group(1))
-            matched_text = match.group(0)
-            if 'um' in pattern.lower():
-                physical_nm = value * 1000  # 微米转纳米
-            else:
-                physical_nm = value
-            break
-
-    if physical_nm is None or physical_nm <= 0:
-        raise ScaleExtractionError(
-            f"OCR未能识别有效标尺文本。识别内容: '{text.strip()}'"
-        )
-
-    return physical_nm, matched_text or text.strip()
-
-
-def _extract_pixel_length(bottom_region: np.ndarray) -> float:
-    """
-    提取标尺线段的像素长度
-
-    使用二值化+形态学操作找到最长的水平白色线段
-
-    Args:
-        bottom_region: 底部区域图像
-
-    Returns:
-        线段的像素宽度
-    """
-    # 转为灰度图
-    gray = cv2.cvtColor(bottom_region, cv2.COLOR_BGR2GRAY)
-
-    # 自适应阈值二值化
-    _, binary = cv2.threshold(
-        gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
-    )
-
-    # 形态学操作：闭运算连接线段
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 3))
-    closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-
-    # 寻找轮廓
-    contours, _ = cv2.findContours(
-        closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-    )
-
-    if not contours:
-        # 备选方案：直接扫描底部区域找水平白线
-        return _scan_horizontal_line(gray)
-
-    # 找最长的水平轮廓
-    max_width = 0
-    best_x, best_y = 0, 0
-
-    for contour in contours:
-        x, y, w, h = cv2.boundingRect(contour)
-
-        # 过滤掉太小的或太垂直的轮廓
-        aspect_ratio = w / h if h > 0 else 0
-        if w > 20 and aspect_ratio > 3:  # 宽度>20，长宽比>3
-            if w > max_width:
-                max_width = w
-                best_x, best_y = x, y
-
-    if max_width > 0:
-        return float(max_width)
-
-    # 备选：扫描水平线
-    return _scan_horizontal_line(gray)
-
-
-def _scan_horizontal_line(gray_image: np.ndarray) -> float:
-    """
-    备选方案：扫描图像底部水平白线的像素宽度
-
-    Args:
-        gray_image: 灰度图像
-
-    Returns:
-        检测到的最大线宽
-    """
-    height, width = gray_image.shape
-
-    # 扫描底部1/4区域
-    scan_region = gray_image[int(height * 3 / 4):height, :]
-
-    # 水平Sobel算子
-    sobelx = cv2.Sobel(scan_region, cv2.CV_64F, 1, 0, ksize=3)
-    abs_sobelx = np.abs(sobelx)
-
-    # 阈值化
-    _, binary = cv2.threshold(abs_sobelx, 50, 255, cv2.THRESH_BINARY)
-
-    # 水平方向投影
-    horizontal_projection = np.sum(binary, axis=0)
-
-    # 找到最大连续高值区间的宽度
-    threshold = np.max(horizontal_projection) * 0.5
-    in_line = False
-    max_line_width = 0
-    current_width = 0
-
-    for val in horizontal_projection:
-        if val > threshold:
-            current_width += 1
-            in_line = True
-        else:
-            if in_line:
-                max_line_width = max(max_line_width, current_width)
-                current_width = 0
-                in_line = False
-
-    max_line_width = max(max_line_width, current_width)
-
-    # 如果还是没找到，返回估计值
-    if max_line_width < 10:
-        # 估算：假设标尺占底部15%区域的10%-30%
-        estimated_width = width * 0.2
-        return estimated_width
-
-    return float(max_line_width)
+    """兼容旧接口：只返回 nm/px。"""
+    return float(extract_scale_info(image_matrix, debug=False)["scale_ratio"])
 
 
 def validate_scale_ratio(
     scale_ratio: float,
     image_width: int,
     min_diameter_nm: float = 1.0,
-    max_diameter_nm: float = 5000.0
+    max_diameter_nm: float = 5000.0,
 ) -> bool:
-    """
-    验证提取的比例尺是否合理
-
-    根据图像宽度和常见的颗粒直径范围进行校验
-
-    Args:
-        scale_ratio: 比例尺 (nm/pixel)
-        image_width: 图像宽度（像素）
-        min_diameter_nm: 最小颗粒直径（纳米）
-        max_diameter_nm: 最大颗粒直径（纳米）
-
-    Returns:
-        是否合理
-    """
-    # 根据图像宽度，计算合理的颗粒直径范围
+    """粗略校验比例尺是否落在常见粒径范围内。"""
+    if image_width <= 0:
+        return False
     min_valid_ratio = min_diameter_nm / image_width
     max_valid_ratio = max_diameter_nm / image_width
-
     return min_valid_ratio <= scale_ratio <= max_valid_ratio
+
+
+# ---------------------------------------------------------------------------
+# 内部实现
+# ---------------------------------------------------------------------------
+
+def _decode_image(image_input: Union[np.ndarray, bytes]) -> np.ndarray:
+    if isinstance(image_input, (bytes, bytearray)):
+        nparr = np.frombuffer(image_input, np.uint8)
+        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if image is None:
+            raise ScaleExtractionError("无法解码图像数据")
+        return image
+    if image_input is None or getattr(image_input, "size", 0) == 0:
+        raise ScaleExtractionError("无效图像输入")
+    return image_input
+
+
+def _iter_search_regions(height: int, width: int) -> List[Dict[str, Any]]:
+    """
+    按优先级生成比例尺搜索区域（全图坐标）。
+    默认优先底部 20%；失败后再扩大范围与角落。
+    """
+    regions: List[Dict[str, Any]] = []
+
+    def add_bottom(ratio: float, name: str) -> None:
+        h = max(8, int(height * ratio))
+        regions.append({
+            "strategy": name,
+            "x": 0,
+            "y": height - h,
+            "w": width,
+            "h": h,
+        })
+
+    add_bottom(0.20, "bottom_20")
+    add_bottom(0.30, "bottom_30")
+    add_bottom(0.40, "bottom_40")
+
+    # 底部左右角（部分 SEM 标尺在角落）
+    corner_h = max(8, int(height * 0.22))
+    corner_w = max(8, int(width * 0.45))
+    regions.append({
+        "strategy": "bottom_left_corner",
+        "x": 0,
+        "y": height - corner_h,
+        "w": corner_w,
+        "h": corner_h,
+    })
+    regions.append({
+        "strategy": "bottom_right_corner",
+        "x": width - corner_w,
+        "y": height - corner_h,
+        "w": corner_w,
+        "h": corner_h,
+    })
+
+    return regions
+
+
+def _ocr_scale_label(region: np.ndarray) -> Tuple[float, str, str]:
+    """
+    仅识别标尺文字（物理长度 + 单位），不输出 nm/px。
+
+    Returns:
+        (physical_length_nm, matched_text, raw_ocr_text)
+    """
+    try:
+        import pytesseract
+    except ImportError:
+        raise ScaleExtractionError("请安装 pytesseract: pip install pytesseract")
+
+    variants = _build_ocr_variants(region)
+    configs = [
+        "--psm 6 --oem 3",   # 假设块状文本
+        "--psm 7 --oem 3",   # 单行
+        "--psm 11 --oem 3",  # 稀疏文本
+    ]
+
+    best: Optional[Tuple[float, str, str, int]] = None
+    all_raw: List[str] = []
+
+    for gray in variants:
+        for cfg in configs:
+            try:
+                text = pytesseract.image_to_string(gray, config=cfg) or ""
+            except Exception:
+                continue
+            text = text.strip()
+            if text:
+                all_raw.append(text)
+            parsed = _parse_scale_label(text)
+            if parsed is None:
+                continue
+            physical_nm, matched, score = parsed
+            if best is None or score > best[3]:
+                best = (physical_nm, matched, text, score)
+
+    if best is None:
+        joined = " | ".join(all_raw[:3]) if all_raw else "(empty)"
+        raise ScaleExtractionError(
+            f"OCR未能识别有效标尺文字（期望如 '100 nm' / '1 μm'）。原始内容: '{joined}'"
+        )
+
+    physical_nm, matched, raw, _ = best
+    return physical_nm, matched, raw
+
+
+def _build_ocr_variants(region: np.ndarray) -> List[np.ndarray]:
+    """生成若干增强灰度图，提高底部小字 OCR 成功率。"""
+    if region.ndim == 3:
+        gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = region.copy()
+
+    # 放大：底部状态栏文字通常很小
+    h, w = gray.shape[:2]
+    scale = 3 if max(h, w) < 800 else 2
+    up = cv2.resize(gray, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC)
+    up = cv2.GaussianBlur(up, (3, 3), 0)
+    eq = cv2.equalizeHist(up)
+
+    _, otsu = cv2.threshold(eq, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    otsu_inv = cv2.bitwise_not(otsu)
+    adap = cv2.adaptiveThreshold(
+        eq, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 8
+    )
+
+    # 去重：按内容哈希简单去重
+    variants: List[np.ndarray] = []
+    seen = set()
+    for img in (up, eq, otsu, otsu_inv, adap):
+        key = hash(img.tobytes()[:: max(1, img.size // 5000)])
+        if key in seen:
+            continue
+        seen.add(key)
+        variants.append(img)
+    return variants
+
+
+def _parse_scale_label(text: str) -> Optional[Tuple[float, str, int]]:
+    """
+    从 OCR 文本解析标尺标注。
+
+    Returns:
+        (physical_nm, matched_text, score) 或 None
+    """
+    if not text:
+        return None
+
+    # 规范化常见 OCR 误识
+    normalized = (
+        text.replace("µ", "μ")
+        .replace("u m", "um")
+        .replace("n m", "nm")
+        .replace("1Jm", "1μm")
+        .replace("1 jm", "1 μm")
+    )
+
+    candidates: List[Tuple[float, str, int]] = []
+    for pattern, unit_to_nm in _SCALE_PATTERNS:
+        for match in pattern.finditer(normalized):
+            value = float(match.group(1))
+            if value <= 0:
+                continue
+            physical_nm = value * unit_to_nm
+            # 常见 SEM 标尺：1~10000 nm 量级更可信
+            score = 10
+            if 1 <= physical_nm <= 10000:
+                score += 5
+            if re.search(r"\b(nm|μm|um)\b", match.group(0), re.IGNORECASE):
+                score += 3
+            # 偏好整数常见刻度
+            if value in {1, 2, 5, 10, 20, 50, 100, 200, 500, 1000}:
+                score += 4
+            candidates.append((physical_nm, match.group(0).strip(), score))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: x[2], reverse=True)
+    return candidates[0]
+
+
+def _detect_scale_bar(region: np.ndarray) -> Optional[Dict[str, float]]:
+    """
+    在比例尺区域内检测水平标尺线。
+
+    Returns:
+        {"x1","y1","x2","y2","length_px"} 相对 region 左上角；失败返回 None。
+        绝不使用“按宽度比例估算”的伪长度。
+    """
+    if region.ndim == 3:
+        gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = region
+
+    h, w = gray.shape[:2]
+    candidates: List[Dict[str, float]] = []
+
+    # 方案 A：轮廓法（亮线 / 暗线各试一次）
+    for invert in (False, True):
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        if invert:
+            binary = cv2.bitwise_not(binary)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(15, w // 40), 2))
+        closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for contour in contours:
+            x, y, bw, bh = cv2.boundingRect(contour)
+            if bw < max(20, int(w * 0.03)):
+                continue
+            if bh <= 0:
+                continue
+            aspect = bw / bh
+            if aspect < 4:
+                continue
+            # 用该行上的连续前景像素精修长度
+            refined = _refine_horizontal_run(binary, y, bh, x, bw)
+            length = refined["length_px"] if refined else float(bw)
+            if length < 20:
+                continue
+            candidates.append({
+                "x1": float(refined["x1"] if refined else x),
+                "y1": float(y + bh / 2.0),
+                "x2": float(refined["x2"] if refined else x + bw),
+                "y2": float(y + bh / 2.0),
+                "length_px": float(length),
+                "score": float(length * min(aspect, 50)),
+            })
+
+    # 方案 B：逐行扫描最长水平亮/暗段
+    scanned = _scan_longest_horizontal_run(gray)
+    if scanned is not None:
+        scanned["score"] = scanned["length_px"] * 8.0
+        candidates.append(scanned)
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda c: c["score"], reverse=True)
+    best = candidates[0]
+    return {
+        "x1": best["x1"],
+        "y1": best["y1"],
+        "x2": best["x2"],
+        "y2": best["y2"],
+        "length_px": best["length_px"],
+    }
+
+
+def _refine_horizontal_run(
+    binary: np.ndarray,
+    y: int,
+    bh: int,
+    x: int,
+    bw: int,
+) -> Optional[Dict[str, float]]:
+    """在包围盒附近取中位行，测量最长连续前景段。"""
+    h, w = binary.shape[:2]
+    y0 = max(0, y)
+    y1 = min(h, y + max(bh, 1))
+    row = binary[y0:y1, :].max(axis=0)
+    return _longest_run_in_row(row, min_val=127)
+
+
+def _scan_longest_horizontal_run(gray: np.ndarray) -> Optional[Dict[str, float]]:
+    """扫描灰度图每一行，找最长连续高对比水平段。"""
+    h, w = gray.shape[:2]
+    # 只扫中下部，SEM 标尺通常靠近文字下方
+    y_start = int(h * 0.35)
+    best: Optional[Dict[str, float]] = None
+
+    for invert in (False, True):
+        work = 255 - gray if invert else gray
+        # 相对阈值：偏亮像素
+        thr = max(40, int(np.percentile(work, 75)))
+        for yi in range(y_start, h):
+            row = work[yi]
+            mask = (row >= thr).astype(np.uint8) * 255
+            run = _longest_run_in_row(mask, min_val=127)
+            if run is None:
+                continue
+            if run["length_px"] < max(20, int(w * 0.04)):
+                continue
+            if best is None or run["length_px"] > best["length_px"]:
+                best = {
+                    "x1": run["x1"],
+                    "y1": float(yi),
+                    "x2": run["x2"],
+                    "y2": float(yi),
+                    "length_px": run["length_px"],
+                }
+    return best
+
+
+def _longest_run_in_row(row: np.ndarray, min_val: int = 127) -> Optional[Dict[str, float]]:
+    """一维数组上找最长连续超阈值区间。"""
+    best_len = 0
+    best_start = 0
+    cur_len = 0
+    cur_start = 0
+    for i, v in enumerate(row.tolist()):
+        if v >= min_val:
+            if cur_len == 0:
+                cur_start = i
+            cur_len += 1
+            if cur_len > best_len:
+                best_len = cur_len
+                best_start = cur_start
+        else:
+            cur_len = 0
+    if best_len < 10:
+        return None
+    return {
+        "x1": float(best_start),
+        "x2": float(best_start + best_len - 1),
+        "length_px": float(best_len),
+    }
+
+
+def _estimate_confidence(matched_text: str, pixel_length: float, ocr_raw: str) -> str:
+    text = matched_text or ""
+    if not text or not re.search(r"\d", text):
+        return "low"
+    unit_ok = bool(re.search(r"(nm|μm|um|micron)", text, re.IGNORECASE))
+    if unit_ok and pixel_length >= 50 and len((ocr_raw or "").strip()) > 0:
+        return "high"
+    if unit_ok and pixel_length >= 20:
+        return "medium"
+    return "low"

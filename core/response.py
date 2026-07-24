@@ -51,7 +51,8 @@ def error_response(
     code: str,
     message: str,
     detail: Optional[str] = None,
-    http_status: int = 400
+    http_status: int = 400,
+    data: Any = None,
 ) -> JSONResponse:
     """
     生成错误响应 JSONResponse
@@ -61,6 +62,7 @@ def error_response(
         message: 用户友好提示
         detail: 详细错误（内部日志用）
         http_status: HTTP 状态码
+        data: 可选附加数据（如 OCR debug）
 
     Returns:
         JSONResponse
@@ -68,14 +70,18 @@ def error_response(
     if code not in ERROR_CODES:
         code = "INTERNAL_ERROR"
 
+    content = {
+        "success": False,
+        "code": code,
+        "message": message,
+        "detail": detail
+    }
+    if data is not None:
+        content["data"] = data
+
     return JSONResponse(
         status_code=http_status,
-        content={
-            "success": False,
-            "code": code,
-            "message": message,
-            "detail": detail
-        }
+        content=content
     )
 
 

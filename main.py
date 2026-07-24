@@ -379,20 +379,29 @@ async def system_status():
 # =========================================================
 
 @app.post("/api/scale/extract")
-async def extract_scale_endpoint(file: UploadFile = File(...)):
+async def extract_scale_endpoint(
+    file: UploadFile = File(...),
+    debug: str = Form("false", description="是否返回调试信息 true/false"),
+    pixel_length: float = Form(None, description="用户标注的标尺线像素长度"),
+    physical_length_nm: float = Form(None, description="OCR失败时手动物理长度(nm)"),
+    bar_x1: float = Form(None),
+    bar_y1: float = Form(None),
+    bar_x2: float = Form(None),
+    bar_y2: float = Form(None),
+):
     """
-    V2.1 比例尺预识别接口
+    比例尺预识别接口（OCR 文字 + 用户标注标尺线）
 
     流程：
-    1. 上传图像
-    2. 校验文件
-    3. 调用 extract_scale_info 返回结构化结果
-    4. 前端展示识别值，用户点击确认后再调用 analyze 接口
+    1. 前端用户两点标注标尺线，得到 pixel_length
+    2. OCR 仅识别标尺文字（如 100 nm / 1 μm）
+    3. nm/px = physical_length_nm / pixel_length
+    4. 前端展示识别细节，用户确认后再分析
     """
+    debug_flag = str(debug).strip().lower() in {"1", "true", "yes", "on"}
     try:
         image_bytes = await file.read()
 
-        # 文件校验
         ok, err = validate_image_file(file.filename, image_bytes)
         if not ok:
             return error_response(
@@ -401,18 +410,50 @@ async def extract_scale_endpoint(file: UploadFile = File(...)):
                 http_status=400
             )
 
-        # 调用 OCR
-        scale_info = extract_scale_info(image_bytes)
+        if pixel_length is None or float(pixel_length) <= 0:
+            return error_response(
+                code="INVALID_REQUEST",
+                message="请先在图像上标注标尺线两端，再识别比例尺",
+                http_status=400,
+            )
+
+        bar_points = None
+        if None not in (bar_x1, bar_y1, bar_x2, bar_y2):
+            bar_points = {
+                "x1": float(bar_x1),
+                "y1": float(bar_y1),
+                "x2": float(bar_x2),
+                "y2": float(bar_y2),
+            }
+
+        scale_info = extract_scale_info(
+            image_bytes,
+            debug=debug_flag,
+            pixel_length=float(pixel_length),
+            physical_length_nm=(
+                float(physical_length_nm)
+                if physical_length_nm is not None and float(physical_length_nm) > 0
+                else None
+            ),
+            bar_points=bar_points,
+        )
         return success_response(
             data=scale_info,
             message="比例尺识别成功，请确认后开始分析"
         )
     except ScaleExtractionError as e:
+        err_data = {"debug": e.debug} if (debug_flag and getattr(e, "debug", None)) else None
+        # 方便前端区分：需要手动输入物理长度
+        need_physical = "手动输入物理长度" in str(e)
+        if err_data is None:
+            err_data = {}
+        err_data["need_physical_length"] = need_physical
         return error_response(
             code="OCR_FAILED",
-            message="OCR 未能识别比例尺，请手动输入 nm/px",
+            message=str(e) if need_physical else "未能识别比例尺文字，请手动输入物理长度(nm)",
             detail=str(e),
-            http_status=400
+            http_status=400,
+            data=err_data,
         )
     except Exception as e:
         return safe_error(
@@ -933,13 +974,21 @@ async def analyze_secure(
 
 @app.post("/api/extract_scale")
 async def extract_scale(
-    file: UploadFile = File(..., description="SEM图像")
+    file: UploadFile = File(..., description="SEM图像"),
+    debug: str = Form("false", description="是否返回调试信息 true/false"),
+    pixel_length: float = Form(None, description="用户标注的标尺线像素长度"),
+    physical_length_nm: float = Form(None, description="OCR失败时手动物理长度(nm)"),
+    bar_x1: float = Form(None),
+    bar_y1: float = Form(None),
+    bar_x2: float = Form(None),
+    bar_y2: float = Form(None),
 ):
     """
     仅提取比例尺（OCR独立接口）— 旧路径
 
     推荐新接口：POST /api/scale/extract（统一响应格式）
     """
+    debug_flag = str(debug).strip().lower() in {"1", "true", "yes", "on"}
     try:
         file_bytes = await file.read()
         if not file_bytes:
@@ -948,13 +997,44 @@ async def extract_scale(
         return safe_error(e, default_code="INVALID_REQUEST", default_message=f"读取文件失败: {str(e)}", http_status=400)
 
     try:
-        scale_info = extract_scale_info(file_bytes)
+        if pixel_length is None or float(pixel_length) <= 0:
+            return error_response(
+                code="INVALID_REQUEST",
+                message="请先在图像上标注标尺线两端，再识别比例尺",
+                http_status=400,
+            )
+        bar_points = None
+        if None not in (bar_x1, bar_y1, bar_x2, bar_y2):
+            bar_points = {
+                "x1": float(bar_x1),
+                "y1": float(bar_y1),
+                "x2": float(bar_x2),
+                "y2": float(bar_y2),
+            }
+        scale_info = extract_scale_info(
+            file_bytes,
+            debug=debug_flag,
+            pixel_length=float(pixel_length),
+            physical_length_nm=(
+                float(physical_length_nm)
+                if physical_length_nm is not None and float(physical_length_nm) > 0
+                else None
+            ),
+            bar_points=bar_points,
+        )
         return success_response(data=scale_info, message="OCR识别成功")
     except ScaleExtractionError as e:
+        err_data = {"debug": e.debug} if (debug_flag and getattr(e, "debug", None)) else None
+        need_physical = "手动输入物理长度" in str(e)
+        if err_data is None:
+            err_data = {}
+        err_data["need_physical_length"] = need_physical
         return error_response(
             code="OCR_FAILED",
             message=str(e),
-            http_status=400
+            detail=str(e),
+            http_status=400,
+            data=err_data,
         )
     except Exception as e:
         return safe_error(e, default_code="OCR_FAILED", default_message="OCR处理失败", http_status=500)
